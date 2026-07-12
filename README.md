@@ -32,9 +32,13 @@
 ## 快速开始
 
 ```bash
-git clone https://github.com/yourname/homedash.git
+git clone https://github.com/yuyuan1019/homedash.git
 cd homedash
 pip install -r requirements.txt
+
+# 配置环境变量
+cp .env.example .env
+# 编辑 .env（Kuma DB 路径、设备配置路径）
 
 # 配置米家设备
 cp config/devices.yaml.example config/devices.yaml
@@ -72,32 +76,29 @@ devices:
 | `KUMA_DB_PATH` | `/data/kuma.db` | Uptime Kuma 的 SQLite 文件路径 |
 | `DEVICES_PATH` | `config/devices.yaml` | 米家设备配置文件路径 |
 
-## Docker 部署
+## Docker 一键部署
 
-```yaml
-# docker-compose.yml
-services:
-  homedash:
-    build: .
-    ports:
-      - "8088:8000"
-    environment:
-      - KUMA_DB_PATH=/data/kuma.db
-      - DEVICES_PATH=/app/config/devices.yaml
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-      - /path/to/your/kuma.db:/data/kuma.db:ro   # 只读挂载 Kuma DB
-    network_mode: host   # 米家设备需要局域网访问
-    restart: unless-stopped
+```bash
+git clone https://github.com/yuyuan1019/homedash.git
+cd homedash
+
+# 1. 配置环境变量
+cp .env.example .env
+
+# 2. 配置米家设备
+cp config/devices.yaml.example config/devices.yaml
+# 编辑 devices.yaml，填入设备 IP 和 token
+
+# 3. 编辑 docker-compose.yml，把 Kuma DB 挂载路径改成你的
+
+# 4. 启动
+docker compose up -d
+# 打开 http://localhost:8088
 ```
 
-部署步骤：
-1. 从 `config/devices.yaml.example` 拷贝创建 `config/devices.yaml`，填入设备 token
-2. 找到你的 Uptime Kuma 数据库文件（通常在 Kuma 容器的 `/app/data/kuma.db`），只读挂载
-3. `docker compose up -d`
-
-> `network_mode: host` 是为了 python-miio 能直接发现和控制局域网设备。不使用米家设备可去掉。
+docker-compose.yml 会自动读取 `.env` 文件注入环境变量，只需改两个文件：
+- `.env`：环境变量配置
+- `config/devices.yaml`：米家设备配置
 
 ## 验证
 

@@ -1,5 +1,7 @@
+# 加 .env 文件到 gitignore
 .venv/
 __pycache__/
 *.pyc
 data/homedash.db
 config/devices.yaml
+.env
