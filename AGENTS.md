@@ -57,7 +57,8 @@ DESIGN.md 是初版设计，**与代码有出入，以代码为准**：
 - Docker 部署已可用：`Dockerfile` + `docker-compose.yml`，Kuma 数据目录用 `.env` 的 `KUMA_DATA_DIR` 配置。
 - 设备状态接口已可用：`GET /api/devices/status` 返回每台设备 online/power（best-effort）。
 - 日用品预测升级（EWMA 等）**仅有规格、未开发**，见 DEVPLAN 待办 0。用户可先登记纸品/洗护/猫用品/冷冻食品等，模型升级后自动受益。
-- 周报邮件（待办 6，**Gmail**，正文含 **重点待办 + 需购买**）、重点待办模块（待办 8）、语音记账（待办 7，**LLM 解析写库存**）**仅有规格、未开发**。
+- 周报邮件（待办 6，**Gmail**，正文含 **重点待办 + 需购买**）、重点待办（待办 8，含 **`/api/agent/todos/*` 供 home agent 拉 due 并投递 QQ/微信**）、语音记账（待办 7）**仅有规格、未开发**。
+  - HomeDash **不内置**微信/QQ 协议；IM 投递由 Hermes/home agent 调 agent 接口完成。
 - `requirements.txt` 里**没有 jinja2**（DESIGN 列了但实际没装）。
 
 ## 代码风格约定

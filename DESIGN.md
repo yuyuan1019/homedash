@@ -6,7 +6,7 @@
 1. **米家设备控制** - python-miio 局域网直控灯/空调/插座等
 2. **Uptime 监控** - 直读 Uptime Kuma 的 SQLite，展示心跳状态
 3. **日用品管理** - 记录消耗/购买，预测补货（现状：线性全历史平均；目标：EWMA + 安全库存，见 DEVPLAN 待办 0）
-4. **重点待办** - 家庭 to-do（规划中，DEVPLAN 待办 8），并进入 Gmail 周报（待办 6）
+4. **重点待办** - 家庭 to-do（规划中，DEVPLAN 待办 8）；预留 **home agent HTTP 接口** 以便定时提醒投递到 QQ/微信；并进入 Gmail 周报（待办 6）
 
 ## 当前状态
 
@@ -17,7 +17,7 @@
 | Phase 3 | 前端页面 (style.css + app.js) | ✅ 完成（米家风格设备页） |
 | Phase 4 | Docker 部署 | ✅ 完成 |
 | 增强 | 日用品预测升级 EWMA | ⬜ 待开发（规格在 DEVPLAN 待办 0） |
-| 增强 | 重点待办事项 | ⬜ 待开发（家庭 to-do，DEVPLAN 待办 8） |
+| 增强 | 重点待办事项 | ⬜ 待开发（to-do + agent 接口，DEVPLAN 待办 8） |
 | 增强 | 周报邮件提醒 | ⬜ 待开发（Gmail：待办+需购买，DEVPLAN 待办 6） |
 | 增强 | 语音记账入库 | ⬜ 待开发（STT + LLM 解析，DEVPLAN 待办 7） |
 

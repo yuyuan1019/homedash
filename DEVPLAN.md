@@ -406,8 +406,13 @@ CREATE TABLE IF NOT EXISTS todos (
     status TEXT DEFAULT 'open',       -- open | done
     due_date TEXT,                    -- YYYY-MM-DD，可空
     assignee TEXT,                    -- 可选：我 / 配偶 / 双方 / 自由文本
+    -- 给 home agent / 外部调度用的提醒元数据（可空 = 不单独 IM 提醒）
+    remind_at TEXT,                   -- ISO 本地时间，如 2026-07-20T09:00:00
+    remind_channels TEXT,             -- JSON 数组字符串：["qq","wechat","email"]；空=跟随默认
+    remind_repeat TEXT,               -- none | daily | weekly | once（once 触发后清 remind_at 或标 fired）
+    external_ref TEXT,                -- 外部系统 id（Hermes cron job id 等），可空
     created_at TEXT DEFAULT (datetime('now')),
-    completed_at TEXT,                -- 完成时写入
+    completed_at TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
 );
 ```
@@ -417,23 +422,27 @@ CREATE TABLE IF NOT EXISTS todos (
 - `priority` ∈ {high, medium, low}
 - `status` ∈ {open, done}
 - 完成时：`status=done` 且 `completed_at=now`；重新打开则清空 `completed_at`
+- `remind_channels` 存 JSON 文本，如 `'["qq","wechat"]'`；非法 JSON 读写时当空
 
-### 8.3 API
+### 8.3 API（面板 + **home agent 稳定接口**）
+
+> **设计原则**：HomeDash 管「待办事实与提醒意图」；**不内置**微信/QQ 协议机器人。  
+> **Hermes / home agent** 通过下列 HTTP 接口拉取待办、登记提醒、回写完成；真正发到 QQ/微信由 agent 的既有通道（qqbot、telegram、后续 wechat 插件等）完成。
+
+#### 8.3.1 面板 CRUD
 
 ```
 GET    /api/todos?status=open|done|all   默认 open
-POST   /api/todos                        创建
+POST   /api/todos                        创建（可带 remind_* 字段）
 GET    /api/todos/{id}
 PUT    /api/todos/{id}                   编辑字段
 POST   /api/todos/{id}/done              标记完成
 POST   /api/todos/{id}/reopen            重新打开
 DELETE /api/todos/{id}
-
-# 供邮件/汇总
 GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
 ```
 
-**POST body 示例：**
+**POST /api/todos body 示例：**
 
 ```json
 {
@@ -441,45 +450,173 @@ GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
   "note": "柜下 3M，备件在储物间",
   "priority": "high",
   "due_date": "2026-07-31",
-  "assignee": "双方"
+  "assignee": "双方",
+  "remind_at": "2026-07-30T09:00:00",
+  "remind_channels": ["qq", "wechat"],
+  "remind_repeat": "once"
 }
 ```
 
-排序：`open` 列表 = priority 权重 DESC，`due_date` ASC NULLS LAST，`id` DESC。
+排序：`open` = priority DESC，`due_date` ASC NULLS LAST，`id` DESC。
 
-### 8.4 前端（第四 Tab 建议）
+#### 8.3.2 Agent 专用接口（预留，实现时必须有）
 
-`index.html` 增加 Tab：`设备 | 监控 | 日用品 | 待办`（改骨架允许；与「尽量不改 index」的旧约束冲突时，**以本待办为准**）。
+统一前缀：`/api/agent/todos`  
+鉴权：内网默认可先用共享头（见下）；**密钥只放 `.env`**。
 
-- 列表卡片：标题、优先级色点、截止日期、负责人
-- 过期：`due_date < today && open` → 红色「已过期」
-- 快捷：点圆圈标记完成
-- 添加按钮 → 底部 sheet 表单
-- 中文 UI，米家浅色风格与现有页一致
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| GET | `/api/agent/todos/due` | 拉取**到点应提醒**的未完成待办 |
+| GET | `/api/agent/todos/open` | 拉取全部 open（可选 `priority=high`） |
+| POST | `/api/agent/todos` | agent 代建待办（同 POST /api/todos） |
+| POST | `/api/agent/todos/{id}/remind-fired` | 标记本次提醒已投递（防重复刷屏） |
+| POST | `/api/agent/todos/{id}/done` | agent 代用户完成 |
+| PUT | `/api/agent/todos/{id}/remind` | 只改提醒字段（改点/频道/周期） |
 
-### 8.5 与语音 / LLM（可选联动，二期）
+**`GET /api/agent/todos/due` 查询参数：**
 
-待办 7 的 LLM 若已通，可扩展 action：
+| 参数 | 说明 |
+|------|------|
+| `now` | 可选，ISO 时间；默认服务器本地 now（`NOTIFY_TZ`） |
+| `within_minutes` | 默认 15；`remind_at ∈ (now-window, now+window]` 或 `remind_at <= now` 且未 fired |
+| `channel` | 可选过滤：`qq` / `wechat` / `email` |
 
-- `create_todo` / `complete_todo`  
-本期 **不强制**；先保证表单 CRUD + 进邮件。
+**响应示例：**
 
-### 8.6 实现文件（预估）
+```json
+{
+  "server_time": "2026-07-20T09:00:00",
+  "items": [
+    {
+      "id": 12,
+      "title": "换净水器滤芯",
+      "note": "柜下 3M",
+      "priority": "high",
+      "due_date": "2026-07-31",
+      "assignee": "双方",
+      "remind_at": "2026-07-20T09:00:00",
+      "remind_channels": ["qq", "wechat"],
+      "remind_repeat": "once",
+      "overdue": false,
+      "message": "【HomeDash 待办】换净水器滤芯\n截止 2026-07-31 · 高优先级 · 双方\n柜下 3M"
+    }
+  ]
+}
+```
 
-- `app/database.py`：SCHEMA 加 `todos`
-- `app/modules/todos.py`：CRUD + summary + `__main__` 自检
-- `app/main.py`：挂载 router
-- `app/static/index.html` / `app.js` / `style.css`：第四 Tab
-- 待办 6 的 `notify.py` 调用 `list_open_todos`
+`message` 由服务端拼好，**agent 可直接转发**到 QQ/微信，减少 agent 侧模板逻辑。
 
-### 8.7 明确不做（本期）
+**`POST .../remind-fired` body（可选）：**
 
+```json
+{
+  "channel": "qq",
+  "delivered_at": "2026-07-20T09:00:05",
+  "external_ref": "hermes-cron-job-xxx"
+}
+```
+
+行为：
+
+- `remind_repeat=once` → 清空 `remind_at` 或写 `remind_at` 为 null，避免下周再火
+- `daily` / `weekly` → 把 `remind_at` 推到下一周期（服务端算好）
+- 可记 `external_ref` 方便对账
+
+#### 8.3.3 鉴权（agent 调用）
+
+| 变量 | 说明 |
+|------|------|
+| `AGENT_API_TOKEN` | 非空时：请求头 `X-HomeDash-Token: <token>` 或 `Authorization: Bearer <token>` |
+| 为空 | 仅建议绑定在局域网 / 不映射公网端口（现状家庭内网模式） |
+
+面板浏览器 API 可暂不强制 token（与现有 items 一致）；**agent 路径在 token 配置后必须校验**。
+
+### 8.4 与 home agent 的分工（重点）
+
+```
+┌─────────────┐     HTTP (due/open/CRUD)      ┌──────────────────┐
+│  HomeDash   │ ◄──────────────────────────► │ Hermes/home agent│
+│  todos 真相  │     remind-fired / done       │  调度 + 发 IM     │
+└─────────────┘                               └────────┬─────────┘
+                                                       │
+                       ┌───────────────────────────────┼────────────────┐
+                       ▼                               ▼                ▼
+                    QQ 通道                          微信通道         Gmail 周报
+                 (已有 qqbot)                    (预留/插件)       (待办 6 直发)
+```
+
+| 能力 | 谁负责 |
+|------|--------|
+| 待办 CRUD、截止日、优先级 | **HomeDash** |
+| 提醒时间 `remind_at`、频道意图 | **HomeDash** 存；面板可编辑 |
+| 定时轮询 / cron「每 5～15 分钟拉 due」 | **home agent**（Hermes cron 等） |
+| 发到 QQ / 微信 | **home agent** 调平台 API（不进 HomeDash 进程） |
+| 每周汇总邮件 | **HomeDash** SMTP（待办 6），与 IM 并行不互斥 |
+
+**Agent 侧推荐调度伪逻辑（文档给实现者，不写进镜像）：**
+
+```text
+每 10 分钟:
+  GET /api/agent/todos/due?within_minutes=15
+  for item in items:
+    if "qq" in channels:  send_qq(item.message)
+    if "wechat" in channels: send_wechat(item.message)  # 通道就绪后
+    POST /api/agent/todos/{id}/remind-fired
+```
+
+也可由 agent **创建时**直接登记 Hermes cron（把 `external_ref` 写回 todo），到期只发一条；due 轮询作兜底。
+
+### 8.5 前端（第四 Tab）
+
+`index.html` 增加 Tab：`设备 | 监控 | 日用品 | 待办`（**允许改骨架**）。
+
+- 列表：标题、优先级、截止日期、负责人、**下次提醒时间**（有则显示）
+- 表单增加可选：提醒时间、提醒频道（多选：QQ / 微信 / 仅邮件周报）
+- 过期标红；点圆圈完成
+- 中文 + 米家浅色风格
+
+### 8.6 与语音 / LLM（可选二期）
+
+待办 7 可扩展：`create_todo` / `complete_todo` / `set_remind`。本期不强制。
+
+### 8.7 实现文件（预估）
+
+- `app/database.py`：`todos` 表（含 remind_*）
+- `app/modules/todos.py`：CRUD + summary + agent 路由 + 拼 `message`
+- `app/main.py`：挂载
+- `app/static/*`：第四 Tab
+- `.env.example`：`AGENT_API_TOKEN=`
+- README 增加「home agent 对接」小节（示例 curl）
+- 可选：`docs/agent-todos.md` 给 Hermes 技能引用（若实现时需要再拆）
+
+### 8.8 明确不做（本期）
+
+- **HomeDash 内不实现**微信/QQ 登录协议、iPad 协议、企业微信机器人本体
 - 不做子任务 / 看板 / 番茄钟
 - 不做多人登录权限（assignee 只是标签）
-- 不做日历同步（Google Calendar）
-- 不做每条待办单独 push
+- 不做 Google Calendar 同步
+- 不在公网裸奔无 token 的 agent API
 
----
+### 8.9 验收（含 agent 接口）
+
+```bash
+# 创建带 QQ 提醒的待办
+curl -s -X POST http://127.0.0.1:8088/api/todos \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"测试提醒","priority":"high","remind_at":"<两分钟后 ISO>","remind_channels":["qq"],"remind_repeat":"once"}'
+
+# agent 拉取
+curl -s http://127.0.0.1:8088/api/agent/todos/due \
+  -H "X-HomeDash-Token: $AGENT_API_TOKEN"
+
+# 标记已投递
+curl -s -X POST http://127.0.0.1:8088/api/agent/todos/1/remind-fired \
+  -H "X-HomeDash-Token: $AGENT_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"channel":"qq"}'
+```
+
+面板能完成 CRUD；due 在到点返回且 fired 后不再重复（once）。
 
 ## 待办 7：语音 / 自然语言记账（STT + **LLM 解析** → 库存变更）— **规格，尚未开发**
 
@@ -660,8 +797,9 @@ POST /api/items/voice/transcribe  (multipart audio)
 | 顺序 | 待办 | 原因 |
 |------|------|------|
 | 1 | 0 预测 EWMA | 大批量登记后收益最大 |
-| 2 | **8 重点待办事项** | 周报要带待办，须先有数据与页面 |
+| 2 | **8 重点待办 + agent 接口** | 周报与 QQ/微信提醒的数据源；`/api/agent/todos/due` |
 | 3 | **6 Gmail 周报**（库存 + 重点待办） | 依赖 8；通道 Gmail |
 | 4 | 7 语音 + LLM 解析写库存 | 体验核心；可二期挂 create_todo |
-| 5 | 1 Docker 验收 / 2 灯光 props | 按需 |
+| 5 | home agent 侧 cron 调 due → QQ/微信 | HomeDash 接口就绪后，在 Hermes 配定时任务 |
+| 6 | 1 Docker 验收 / 2 灯光 props | 按需 |
 | 推迟 | 4 粘贴导入 | 仍推迟 |
