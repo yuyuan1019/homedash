@@ -67,7 +67,19 @@ devices:
     type: airconditioner
 ```
 
-**获取 Token：** 使用 `miiocli` 工具或从米家 APK 提取。设备需已绑定米家 App 且与 HomeDash 在同一局域网。
+**获取 Token：** 推荐用 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor)，登录小米账号一键导出所有设备的 name/ip/token/model：
+
+```bash
+pip install xiaomi-cloud-tokens-extractor
+micli
+# 输入小米账号密码，自动列出所有设备 token
+```
+
+> 也有在线版：https://xiaomi-token-web.asd.workers.dev/
+>
+> 备选：`miiocli discover`（仅旧固件）或抓包旧版米家 APK（v5.4.54）。新固件已加密广播包，miiocli 大概率拿不到。
+
+设备需已绑定米家 App 且与 HomeDash 在同一局域网。
 
 ### 环境变量
 
