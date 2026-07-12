@@ -2,7 +2,15 @@
 
 家庭自托管管理面板：**米家设备控制 · Uptime 监控 · 日用品库存预测 ·（规划）重点待办 · Gmail 周报 · AI 工作台**。
 
-中文 UI，无前端框架，Docker 可一键部署。详细待办规格见 [`DEVPLAN.md`](./DEVPLAN.md)，协作约定见 [`AGENTS.md`](./AGENTS.md)，设计说明见 [`DESIGN.md`](./DESIGN.md)。
+中文 UI，无前端框架，Docker 可一键部署。
+
+| 文档 | 用途 |
+|------|------|
+| [`AGENTS.md`](./AGENTS.md) | **AI 独立开发强制规则**（权威顺序、DoD、禁区、提示词） |
+| [`DEVPLAN.md`](./DEVPLAN.md) | 待办规格书（⬜ 未完成项） |
+| [`DESIGN.md`](./DESIGN.md) | 设计背景（可能滞后，以代码与 AGENTS 为准） |
+
+> **给编码 AI：** 本仓库默认由 agent 独立改代码。开始任何功能前先读完 `AGENTS.md` §0，再读 `DEVPLAN.md` 对应待办；完成时必须自检 + 文档同步 + 无密钥入库。
 
 ---
 
@@ -376,11 +384,12 @@ homedash/
 
 | 文件 | 用途 |
 |------|------|
-| [DEVPLAN.md](./DEVPLAN.md) | **待办规格书**（0 预测 / 6 邮件 / 7 AI / 8 待办…） |
-| [DESIGN.md](./DESIGN.md) | 架构与模块设计（含现状 vs 目标） |
-| [AGENTS.md](./AGENTS.md) | 编码约束、勿踩坑、当前阶段 |
+| [AGENTS.md](./AGENTS.md) | **AI 独立开发强制规则**（§0：权威顺序、开工清单、DoD、密钥、禁区、提示词） |
+| [DEVPLAN.md](./DEVPLAN.md) | **待办规格书**（⬜ 未完成；文首有 AI 通用约束） |
+| [DESIGN.md](./DESIGN.md) | 设计背景（可能滞后；冲突时以代码与 AGENTS 为准） |
 
-改功能时：**代码 + README + DEVPLAN/AGENTS 同一事物描述保持一致**。
+改功能时：**代码 + README 状态/API + DEVPLAN 待办状态 + AGENTS 模块表** 保持一致。  
+**禁止**把 DEVPLAN 规划写成 README「已实现」。
 
 ---
 

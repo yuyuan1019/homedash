@@ -37,6 +37,16 @@
 | AI（规划） | httpx → OpenAI-compatible | 白名单 actions 写库，禁止裸 SQL |
 | IM 提醒（规划） | 外部 home agent | HomeDash 只提供 `/api/agent/todos/*` |
 
+## 设计原则
+
+1. **家庭内网优先**，默认无用户登录；敏感文件不进 Git  
+2. **领域模块清晰**：设备 / 监控 / 库存 /（规划）待办 / 通知 / AI 分文件  
+3. **预测与写库可测**：`predict_item` 纯函数；模块尾部 `__main__` 自检  
+4. **AI 不直连 SQL**：只产出白名单 `op`，执行器调现有业务函数  
+5. **IM 不进主进程**：HomeDash 不实现微信/QQ 协议，只留 HTTP 给 agent  
+6. **开源可部署**：路径用环境变量 + `.env.example`，不写死本机绝对路径  
+7. **AI 独立开发友好**：规则写在 `AGENTS.md`（权威顺序、DoD、一次一待办、文档同步义务）；`DEVPLAN` 只写规格不冒充已完成  
+
 ## 架构
 
 ```
