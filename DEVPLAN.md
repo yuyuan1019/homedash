@@ -28,11 +28,14 @@ app/static/
 | 方法 | 路径 | 请求体 | 返回 |
 |------|------|--------|------|
 | GET | `/api/devices` | - | `[{name, model, host, token, type}, ...]`（_inst 等下划线字段已过滤） |
+| GET | `/api/devices/status` | - | `[{name, online, power, ...}, ...]` 批量状态（并发查询，每台 3s 超时） |
 | POST | `/api/devices/{name}/on` | - | `{name, power: "on"}` |
 | POST | `/api/devices/{name}/off` | - | `{name, power: "off"}` |
 | POST | `/api/devices/{name}/command` | `{command: str, params: []}` | `{name, result: ...}` |
 
 注意：设备用 **name**（不是 id）操作。`/devices` 不返回状态，只返回配置。开关失败返回 503。
+
+`/devices/status` 是 Phase 3.5 新增端点，并发查询所有设备状态（`asyncio.gather` + 每台 `asyncio.wait_for` 3s 超时），返回每台设备的 online/power 及可用属性。单台超时不影响其他设备。
 
 ### Uptime 监控
 
@@ -123,25 +126,74 @@ DOWN(离线): #e74c3c
 
 ### 步骤 3：设备控制 Tab
 
-**加载**：`GET /api/devices` -> 渲染设备卡片列表。
+**加载**：并发 `GET /api/devices` + `GET /api/devices/status`，按 type 分组渲染。
 
-每个设备卡片：
+**按类型分组**（用 collapsible 分区，默认全展开）：
+
+| 分组 | type | 图标 | 可操作 |
+|------|------|------|--------|
+| 灯光 | light | 💡 | 开关 |
+| 空调 | airconditioner | ❄️ | 开关 |
+| 空气净化器 | airpurifier | 🌬️ | 开关 |
+| 插座 | plug | 🔌 | 开关 |
+| 摄像头 | camera | 📷 | 开关 |
+| 厨电 | cooker, kettle, waterpuri | 🍳 | 开关（只读状态为主） |
+| 宠物 | feeder, petwaterer | 🐱 | 开关 |
+| 音箱 | speaker | 🔊 | 开关 |
+| 其他 | 兜底 | 📦 | 开关 |
+
+分组布局：
 ```
-┌─────────────────────────────────────────┐
-│  💡 客厅灯            [light]  [开][关] │
-│  💡 卧室灯            [light]  [开][关] │
-│  ❄️ 卧室空调          [aircon] [开][关] │
-│  🔌 客厅插座          [plug]   [开][关] │
-└─────────────────────────────────────────┘
+┌─ 💡 灯光 (6) ─────────────────────────────┐
+│  💡 客厅灯     ● 在线  [开][关]           │
+│  💡 浴室灯     ● 在线  [开][关]           │
+│  💡 餐厅灯     ○ 离线  [开][关]           │
+└──────────────────────────────────────────┘
+┌─ ❄️ 空调 (3) ─────────────────────────────┐
+│  ❄️ 卧室空调   ● 在线  [开][关]           │
+│  ❄️ 猫房空调插座 ● 在线  [开][关]         │
+└──────────────────────────────────────────┘
+┌─ 🔌 插座 (1) ─────────────────────────────┐
+│  🔌 主卧左插线板 ● 在线  [开][关]         │
+└──────────────────────────────────────────┘
+...
 ```
 
-- 设备名前缀图标：按 type 匹配 emoji（light=💡, airconditioner=❄️, plug=🔌, outlet=🔌, 其他=📦）
-- type 标签：灰色小标签
+每个设备卡片显示：
+- **图标 + 名称**：按 type 匹配 emoji
+- **状态指示**：绿色圆点 ● + "在线"，或灰色圆点 ○ + "离线"
+- **开关按钮**：`[开][关]`，当前 power 状态高亮（power=on 时"开"按钮高亮）
+- **操作后**：toast 提示成功/失败，刷新该设备状态
+
+交互细节：
 - 开/关按钮：点击 `POST /api/devices/{name}/on` 或 `off`
-- 操作后 toast 提示成功/失败
-- 按钮点击时禁用 + loading 状态，防止重复点击
-- **没有设备时**显示空状态提示："未配置设备，请编辑 config/devices.yaml"
-- 设备名含 URL 特殊字符时用 `encodeURIComponent(name)`
+- 按钮点击时禁用 + loading 状态（`disabled` + 文字变"..."），防止重复点击
+- 设备名含特殊字符时用 `encodeURIComponent(name)`
+- **没有设备时**显示空状态："未配置设备，请点击「粘贴导入」或编辑 config/devices.yaml"
+- `host` 为空的设备显示"⚠ 未配置 IP"标签，开关按钮禁用
+- 顶部操作栏：`[📥 粘贴导入]` `[🔄 刷新状态]`
+- 刷新状态：重新调 `/devices/status`，只更新状态圆点和按钮高亮，不重建列表
+
+**状态查询设计**（后端 `/devices/status`）：
+```python
+# 并发查所有设备，每台 3s 超时
+async def _query_one(cfg):
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_send, cfg, "get_prop", ["power"]),
+            timeout=3.0
+        )
+        return {"name": cfg["name"], "online": True, "power": result}
+    except Exception:
+        return {"name": cfg["name"], "online": False, "power": None}
+
+@router.get("/devices/status")
+async def device_status():
+    tasks = [_query_one(cfg) for cfg in _devices.values()]
+    results = await asyncio.gather(*tasks)
+    return list(results)
+```
+> ponytail: `get_prop ["power"]` 是多数 miio 设备通用命令，部分设备可能不支持，不支持的返回 online=True 但 power=None。状态查询是 best-effort，不影响开关操作。
 
 ### 步骤 4：监控状态 Tab
 
