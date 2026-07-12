@@ -94,6 +94,18 @@ def _cloud_miot_set(did: str, siid: int, piid: int, value, country: str = "cn"):
     return result
 
 
+def _cloud_miot_get(did: str, siid: int, piid: int, country: str = "cn"):
+    """通过小米云端 MIOT 查询属性。"""
+    cloud = _get_cloud()
+    if cloud is None:
+        raise HTTPException(503, "小米云端未登录，请检查 XIAOMI_USERNAME / XIAOMI_PASSWORD")
+    payload = {"params": [{"did": did, "siid": siid, "piid": piid}]}
+    try:
+        return cloud.request_country("/miotspec/prop/get", country, {"data": json.dumps(payload)})
+    except Exception as e:
+        raise HTTPException(503, f"云端状态查询失败: {e}")
+
+
 # ============ 设备加载 ============
 
 
@@ -152,6 +164,40 @@ def _send_power(cfg: dict, on: bool) -> None:
             _send(cfg, cmds[2], cmds[3])
 
 
+def _val(result):
+    """提取 miio/miot 返回里的第一个值。"""
+    if isinstance(result, list):
+        return result[0] if result else None
+    if isinstance(result, dict):
+        data = result.get("result") or result.get("params") or []
+        if isinstance(data, list) and data:
+            return data[0].get("value") if isinstance(data[0], dict) else data[0]
+    return result
+
+
+def _query_power_sync(cfg: dict) -> dict:
+    """查询单台设备 power；失败只影响本设备。"""
+    base = {"name": cfg["name"], "online": False, "power": None}
+    try:
+        if _is_cloud_device(cfg):
+            dev_type = cfg.get("type", "light")
+            siid, piid = _MIOT_PROPS.get(dev_type, (2, 1))
+            base["power"] = _val(_cloud_miot_get(cfg["did"], cfg.get("siid", siid), piid))
+        else:
+            base["power"] = _val(_send(cfg, "get_prop", ["power"]))
+        base["online"] = True
+    except Exception:
+        pass  # ponytail: status is best-effort; controls still report real errors.
+    return base
+
+
+async def _query_power(cfg: dict) -> dict:
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_query_power_sync, cfg), timeout=3)
+    except Exception:
+        return {"name": cfg["name"], "online": False, "power": None}
+
+
 # ============ API 端点 ============
 
 
@@ -170,6 +216,12 @@ async def list_devices():
     """设备列表 + 配置（不查状态，多设备时太慢）。"""
     return [{k: v for k, v in d.items() if not k.startswith("_")}
             for d in _devices.values()]
+
+
+@router.get("/devices/status")
+async def device_status():
+    """所有设备在线/电源状态；单台失败不影响其他设备。"""
+    return await asyncio.gather(*[_query_power(cfg) for cfg in _devices.values()])
 
 
 @router.post("/devices/{name}/on")
@@ -200,6 +252,8 @@ if __name__ == "__main__":
     for dtype, (on_c, on_p, off_c, off_p) in _POWER_CMDS.items():
         assert on_c and off_c, f"{dtype} 命令缺失"
     assert _DEFAULT[0] == "set_power"
+    assert _val(["on"]) == "on"
+    assert _val({"result": [{"value": True}]}) is True
     load_devices()  # 无文件不报错，有文件正常加载
     # ponytail: 有配置文件时验证加载正确，无配置文件时验证空列表
     if os.path.isfile(DEVICES_PATH):

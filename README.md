@@ -130,30 +130,30 @@ python token_extractor.py
 
 > `XIAOMI_USERNAME`/`XIAOMI_PASSWORD` 只在首次获取云端凭据时需要。成功登录后凭据保存在 `data/xiaomi_cloud.json`，后续运行不再需要账号密码。建议登录完成后从 `.env` 中删除。
 
-## Docker 部署（待实现）
-
-> ⚠️ 尚未提供 Dockerfile，以下为计划中的部署方式。Dockerfile 就绪后按此操作。
+## Docker 部署
 
 ```bash
 git clone https://github.com/yuyuan1019/homedash.git
 cd homedash
 
-# 1. 配置米家设备
+# 1. 配置环境变量
+cp .env.example .env
+# 编辑 .env；如需 Uptime Kuma，设置 KUMA_DATA_DIR 为宿主机 Kuma 数据目录
+
+# 2. 配置米家设备
 cp config/devices.yaml.example config/devices.yaml
 # 编辑 devices.yaml，填入设备信息
-
-# 2. 编辑 docker-compose.yml，把 Kuma DB 挂载路径改成你的
 
 # 3. 启动
 docker compose up -d
 # 打开 http://localhost:8088
 ```
 
-docker-compose.yml 会自动读取 `.env` 文件注入环境变量，只需改两个文件：
-- `.env`：环境变量配置
+Docker Compose 只需要改两个文件：
+- `.env`：端口、Kuma DB 宿主机路径等环境变量
 - `config/devices.yaml`：米家设备配置
 
-> `network_mode: host` 是为了 python-miio 能直接发现和控制局域网设备。不使用米家设备可去掉。
+> 默认使用 Docker bridge 网络，适合按 IP 直连米家设备；如果后续要做局域网自动发现，再改成 host 网络。
 
 ## 验证
 
@@ -168,6 +168,7 @@ python -m app.modules.uptime    # 无 DB 文件不报错自检
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/devices` | 设备列表 |
+| GET | `/api/devices/status` | 设备在线/电源状态（best-effort） |
 | POST | `/api/devices/{name}/on` | 开启设备（WiFi 局域网 / BLE Mesh 云端） |
 | POST | `/api/devices/{name}/off` | 关闭设备 |
 | POST | `/api/devices/{name}/command` | 自定义命令（仅 WiFi 设备） |

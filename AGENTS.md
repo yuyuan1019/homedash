@@ -52,7 +52,8 @@ DESIGN.md 是初版设计，**与代码有出入，以代码为准**：
 
 - 后端 Phase 1+2+3 已完成（items/devices/uptime 三模块 API 全通，BLE Mesh 云端控制已加）。
 - 前端 Phase 3 已完成：`app/static/style.css`（暗色主题）+ `app/static/app.js`（三 Tab 全功能）。设备 Tab 支持 BLE Mesh 云端控制。
-- **有 docker-compose.yml 但无 Dockerfile**，Docker 部署尚未可用。
+- Docker 部署已可用：`Dockerfile` + `docker-compose.yml`，Kuma 数据目录用 `.env` 的 `KUMA_DATA_DIR` 配置。
+- 设备状态接口已可用：`GET /api/devices/status` 返回每台设备 online/power（best-effort）。
 - `requirements.txt` 里**没有 jinja2**（DESIGN 列了但实际没装）。
 
 ## 代码风格约定
