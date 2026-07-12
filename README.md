@@ -85,7 +85,14 @@ python token_extractor.py
 
 **注意：**
 - 有 IP 的设备是 WiFi 直控（python-miio 可控），无 IP 的 BLE 设备（温湿度计、门锁等）不支持局域网直控
-- 导出的 token 直接填入 `config/devices.yaml`，或使用前端的"粘贴导入"功能（见 DEVPLAN.md）
+- 墙壁开关（`bean.switch.*`）在 extractor 输出里通常没有 IP，需从路由器后台查设备 IP 补上
+- 子设备（ID 含 `.s2`/`.s3` 后缀，token 非标准 32 位）不可单独直控，跳过
+
+**两种导入方式：**
+
+**方式一：前端粘贴导入（推荐）** — 设备控制页点"粘贴导入"，把 `token_extractor.py` 的完整输出贴进去，自动解析、过滤不可控设备、推断类型、写入 `config/devices.yaml`。详见 DEVPLAN.md。
+
+**方式二：手动编辑** — 从 extractor 输出中挑可控设备（有 IP + 32 位 token），按上面的 YAML 格式填入 `config/devices.yaml`。
 
 设备需已绑定米家 App 且与 HomeDash 在同一局域网。
 
