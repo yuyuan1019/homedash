@@ -4,3 +4,9 @@ python-miio
 pyyaml
 httpx
 aiosqlite
+python-dotenv
+micloud
+python-dotenv
+micloud
+python-dotenv
+micloud

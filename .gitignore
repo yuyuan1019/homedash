@@ -1,7 +1,11 @@
 # 加 .env 文件到 gitignore
 .venv/
+venv/
 __pycache__/
 *.pyc
 data/homedash.db
+data/xiaomi_cloud.json
+data/ble_devices.json
+data/xiaomi_session.pkl
 config/devices.yaml
 .env

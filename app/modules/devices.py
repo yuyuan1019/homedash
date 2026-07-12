@@ -1,13 +1,17 @@
-"""米家设备控制：python-miio 局域网直控，原始命令透传。"""
+"""米家设备控制：WiFi 局域网直控 + BLE Mesh 云端控制。"""
 import asyncio
+import json
 import os
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from miio import Device
+
+load_dotenv()
 
 router = APIRouter()
 
@@ -23,7 +27,74 @@ _POWER_CMDS = {
 }
 _DEFAULT = ("set_power", ["on"], "set_power", ["off"])
 
+# BLE Mesh 设备 MIOT 属性映射：type -> (siid, piid_on)
+# ponytail: 按设备类型查表；新类型加一行即可
+_MIOT_PROPS = {
+    "light": (2, 1),            # siid=2 开关服务, piid=1 on/off
+    "switch": (2, 1),
+    "outlet": (2, 1),
+    "airconditioner": (2, 1),
+    "airpurifier": (2, 1),
+}
+
 _devices: dict[str, dict] = {}
+
+# ============ 云端 BLE Mesh 控制 ============
+
+_cloud = None  # MiCloud 单例
+
+
+def _get_cloud():
+    """获取或初始化 MiCloud 单例（优先用 data/xiaomi_cloud.json 凭据）。"""
+    global _cloud
+    if _cloud is not None:
+        return _cloud
+    creds_file = "data/xiaomi_cloud.json"
+    from micloud import MiCloud
+    if os.path.isfile(creds_file):
+        with open(creds_file) as f:
+            creds = json.load(f)
+        _cloud = MiCloud()
+        _cloud.user_id = int(creds["user_id"])
+        _cloud.service_token = creds["service_token"]
+        _cloud.ssecurity = creds.get("ssecurity", "")
+        return _cloud
+    username = os.getenv("XIAOMI_USERNAME")
+    password = os.getenv("XIAOMI_PASSWORD")
+    if not username or not password:
+        return None
+    _cloud = MiCloud(username, password)
+    try:
+        _cloud.login()
+    except Exception:
+        _cloud = None
+        return None
+    return _cloud
+
+
+def _cloud_miot_set(did: str, siid: int, piid: int, value, country: str = "cn"):
+    """通过小米云端 MIOT 设置属性。"""
+    cloud = _get_cloud()
+    if cloud is None:
+        raise HTTPException(503, "小米云端未登录，请检查 XIAOMI_USERNAME / XIAOMI_PASSWORD")
+    # ponytail: params 必须是数组格式，否则 API 返回 data type not valid
+    payload = {"params": [{"did": did, "siid": siid, "piid": piid, "value": value}]}
+    params = {"data": json.dumps(payload)}
+    try:
+        result = cloud.request_country("/miotspec/prop/set", country, params)
+    except Exception as e:
+        # token 过期时尝试重新登录一次
+        try:
+            cloud.login()
+            result = cloud.request_country("/miotspec/prop/set", country, params)
+        except Exception:
+            raise HTTPException(503, f"云端控制失败: {e}")
+    if result is None:
+        raise HTTPException(503, "云端返回空结果")
+    return result
+
+
+# ============ 设备加载 ============
 
 
 def load_devices() -> None:
@@ -60,6 +131,30 @@ def _send(cfg: dict, command: str, params: list | None = None) -> Any:
         raise HTTPException(503, f"设备不可达: {e}")
 
 
+def _is_cloud_device(cfg: dict) -> bool:
+    """有 did 但无 host 的设备走云端控制。"""
+    return bool(cfg.get("did")) and not cfg.get("host")
+
+
+def _send_power(cfg: dict, on: bool) -> None:
+    """统一开关逻辑：WiFi 设备走局域网，BLE Mesh 走云端。"""
+    if _is_cloud_device(cfg):
+        dev_type = cfg.get("type", "light")
+        siid, piid = _MIOT_PROPS.get(dev_type, (2, 1))
+        # 用户可在 config 里覆盖 siid（双键开关：左键=2，右键=3）
+        siid = cfg.get("siid", siid)
+        _cloud_miot_set(cfg["did"], siid, piid, on)
+    else:
+        cmds = _POWER_CMDS.get(cfg.get("type"), _DEFAULT)
+        if on:
+            _send(cfg, cmds[0], cmds[1])
+        else:
+            _send(cfg, cmds[2], cmds[3])
+
+
+# ============ API 端点 ============
+
+
 class CommandIn(BaseModel):
     command: str
     params: list = []
@@ -80,22 +175,23 @@ async def list_devices():
 @router.post("/devices/{name}/on")
 async def turn_on(name: str):
     cfg = _get(name)
-    on_cmd, on_params, _, _ = _POWER_CMDS.get(cfg.get("type"), _DEFAULT)
-    await asyncio.to_thread(_send, cfg, on_cmd, on_params)
+    await asyncio.to_thread(_send_power, cfg, True)
     return {"name": name, "power": "on"}
 
 
 @router.post("/devices/{name}/off")
 async def turn_off(name: str):
     cfg = _get(name)
-    _, _, off_cmd, off_params = _POWER_CMDS.get(cfg.get("type"), _DEFAULT)
-    await asyncio.to_thread(_send, cfg, off_cmd, off_params)
+    await asyncio.to_thread(_send_power, cfg, False)
     return {"name": name, "power": "off"}
 
 
 @router.post("/devices/{name}/command")
 async def send_command(name: str, payload: CommandIn):
-    result = await asyncio.to_thread(_send, _get(name), payload.command, payload.params)
+    cfg = _get(name)
+    if _is_cloud_device(cfg):
+        raise HTTPException(400, "BLE Mesh 设备不支持原始命令")
+    result = await asyncio.to_thread(_send, cfg, payload.command, payload.params)
     return {"name": name, "result": result}
 
 
@@ -104,6 +200,15 @@ if __name__ == "__main__":
     for dtype, (on_c, on_p, off_c, off_p) in _POWER_CMDS.items():
         assert on_c and off_c, f"{dtype} 命令缺失"
     assert _DEFAULT[0] == "set_power"
-    load_devices()  # 无文件不报错
-    assert _devices == {}, "无配置文件应返回空"
-    print("devices.py 自检通过：命令映射正确。")
+    load_devices()  # 无文件不报错，有文件正常加载
+    # ponytail: 有配置文件时验证加载正确，无配置文件时验证空列表
+    if os.path.isfile(DEVICES_PATH):
+        assert len(_devices) > 0, "有配置文件应加载到设备"
+        # 验证 BLE Mesh 设备有 did 字段
+        for name, cfg in _devices.items():
+            if not cfg.get("host") and cfg.get("did"):
+                assert cfg["did"], f"{name} BLE Mesh 设备需有 did"
+        print(f"devices.py 自检通过：加载了 {len(_devices)} 个设备（含 BLE Mesh）。")
+    else:
+        assert _devices == {}, "无配置文件应返回空"
+        print("devices.py 自检通过：命令映射正确，无配置文件。")

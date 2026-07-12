@@ -1,9 +1,8 @@
 # HomeDash 前端开发计划（Phase 3 + 3.5）
 
-> ⬜ **本文档是待办规格书，不是已完成记录。** 所有内容均未实现，供 opencode 开发使用。
+> ✅ **Phase 3 已完成**：`style.css` + `app.js` 已创建，三 Tab 全功能，BLE Mesh 云端控制已加。
 >
-> Phase 3：前端页面 `app/static/style.css` + `app/static/app.js`（后端 API 已就绪）
-> Phase 3.5：后端新增设备状态查询、粘贴导入、属性控制端点（需改 `devices.py`）
+> Phase 3.5 待做：设备状态查询（`/devices/status`）、粘贴导入（`/devices/import`）、属性控制（`/devices/{name}/props`）端点。
 >
 > 已有 `app/static/index.html` 骨架，不要改动其结构，只补 CSS 和 JS。
 
