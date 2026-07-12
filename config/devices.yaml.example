@@ -1,0 +1,16 @@
+devices:
+  - name: 客厅灯
+    model: yeelink.light.lamp1
+    host: 192.168.1.100
+    token: <32位hex token>
+    type: light
+  - name: 卧室空调
+    model: zhimi.aircondition.v1
+    host: 192.168.1.101
+    token: <32位hex token>
+    type: airconditioner
+  - name: 客厅插座
+    model: chuangmi.plug.m1
+    host: 192.168.1.102
+    token: <32位hex token>
+    type: plug
