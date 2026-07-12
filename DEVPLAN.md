@@ -234,6 +234,118 @@ uvicorn app.main:app --reload
 #    - 页面暗色风格、中文、移动端可用
 ```
 
+## 粘贴导入米家设备（Phase 3.5）
+
+从 Xiaomi Cloud Tokens Extractor 导出的设备列表，直接粘贴到前端，自动解析并写入 `config/devices.yaml`。免手动编辑 YAML。
+
+### 输入格式（token_extractor.py 原始输出）
+
+```
+Devices found for server "cn" @ home "602001027218":
+   ---------
+   NAME:     客厅灯
+   ID:       1088104207
+   MAC:      C8:5C:CC:D1:78:DF
+   IP:       192.168.1.166
+   TOKEN:    f862d7f1327141cea0115060d590d659
+   MODEL:    bean.switch.bl02
+   ---------
+   NAME:     猫房温湿度计
+   ID:       blt.3.1opcm68cs4g00
+   BLE KEY:  226835f92ca8195235b53a8a9fd80119
+   MAC:      A4:C1:38:19:38:4C
+   TOKEN:    a8c6fc0de7c25fc74e27e298
+   MODEL:    miaomiaoce.sensor_ht.t9
+   ---------
+```
+
+### 后端新增端点
+
+```
+POST /api/devices/import
+  请求体: {"raw": "<token_extractor 原始输出文本>"}
+  返回: {"imported": 3, "skipped": 5, "skipped_list": [...]}
+```
+
+**解析逻辑**（`app/modules/devices.py` 新增 `parse_tokens_output(raw: str) -> list[dict]`）：
+
+1. 按 `---------` 分割成多个设备块
+2. 每块用正则提取 `NAME:`、`MODEL:`、`TOKEN:`、`IP:` 字段
+3. **过滤规则**：
+   - 无 `IP:` 的设备（BLE 设备：温湿度计、门锁、打印机等）跳过，python-miio 局域网直控不支持
+   - TOKEN 长度 != 32 的跳过（子设备 token 是 16 位，不可直控，如 `.s2`/`.s3` 后缀的）
+4. **type 自动推断**（按 model 前缀匹配，匹配不到默认 `plug`）：
+
+```python
+# model -> type 映射，新类型加一行
+_MODEL_TYPE = {
+    "bean.switch":      "light",      # 墙壁开关
+    "znsn.switch":      "light",
+    "yeelink.light":    "light",
+    "lumi.acpartner":   "airconditioner",  # 空调伴侣
+    "xiaomi.airc":      "airconditioner",
+    "zhimi.airpurifier":"airpurifier",
+    "cuco.plug":        "plug",
+    "chuangmi.plug":    "plug",
+    "chuangmi.camera":  "camera",
+    "yunmi.waterpuri":  "waterpuri",
+    "chunmi.cooker":    "cooker",
+    "xiaomi.feeder":    "feeder",
+    "yunmi.kettle":     "kettle",
+    "xiaomi.pet_waterer":"petwaterer",
+    "xiaomi.wifispeaker":"speaker",
+}
+# ponytail: 按 model 前缀匹配，新增类型加一行即可
+```
+
+5. 解析后合并到现有 `_devices` dict（同名跳过），然后写回 `config/devices.yaml`
+6. 返回导入数、跳过数、跳过原因列表
+
+**写回 YAML**：`yaml.dump({"devices": [...]}, allow_unicode=True)`，保留现有设备（去重合并）。
+
+### 前端交互
+
+设备 Tab 顶部加 `[📥 粘贴导入]` 按钮（在 `[+ 添加物品]` 同级位置）：
+
+1. 点击 -> 打开 modal
+2. modal 内容：一个大 `<textarea>` + 说明文字
+   - 说明："粘贴 Xiaomi Cloud Tokens Extractor 的输出。自动过滤 BLE 设备和子设备，只导入有 IP 的 WiFi 设备。"
+3. 底部 `[导入]` 按钮 -> `POST /api/devices/import {raw: textarea内容}`
+4. 返回后 toast 显示 "导入 N 台，跳过 M 台"
+5. 展开跳过列表（折叠的 `<details>`，显示跳过的设备名和原因）
+6. 成功后刷新设备列表
+
+### 自检（devices.py `__main__` 新增）
+
+```python
+# 粘贴导入解析自检
+SAMPLE = '''---------
+   NAME:     客厅灯
+   IP:       192.168.1.166
+   TOKEN:    f862d7f1327141cea0115060d590d659
+   MODEL:    bean.switch.bl02
+   ---------
+   NAME:     猫房温湿度计
+   BLE KEY:  226835f92ca8195235b53a8a9fd80119
+   MAC:      A4:C1:38:19:38:4C
+   TOKEN:    a8c6fc0de7c25fc74e27e298
+   MODEL:    miaomiaoce.sensor_ht.t9
+   ---------
+   NAME:     浴室灯
+   ID:       1088105042.s3
+   TOKEN:    1QDShFsRTIRypEbI
+   MODEL:    bean.switch.bl02
+   ---------'''
+
+parsed = parse_tokens_output(SAMPLE)
+assert len(parsed) == 1, f"应只导入1台(有IP的)，实际{len(parsed)}"
+assert parsed[0]["name"] == "客厅灯"
+assert parsed[0]["type"] == "light"
+assert parsed[0]["host"] == "192.168.1.166"
+# 猫房温湿度计无IP跳过，浴室灯token非32位跳过
+print("devices.py 粘贴导入自检通过。")
+```
+
 ## 不做
 
 - 不做用户认证/登录（纯家庭内网）
@@ -241,5 +353,4 @@ uvicorn app.main:app --reload
 - 不做 PWA/离线支持
 - 不做图表/数据可视化（历史记录用列表展示即可）
 - 不做通知推送（只看面板）
-- 不改后端代码
 - 不改 index.html 的结构（只补 CSS 和 JS）

@@ -67,17 +67,25 @@ devices:
     type: airconditioner
 ```
 
-**获取 Token：** 推荐用 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor)，登录小米账号一键导出所有设备的 name/ip/token/model：
+**获取 Token：** 推荐用 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor)，登录小米账号一键导出所有设备的 name/ip/token/model。
+
+此工具不在 PyPI 上，需从 GitHub clone 运行：
 
 ```bash
-pip install xiaomi-cloud-tokens-extractor
-micli
-# 输入小米账号密码，自动列出所有设备 token
+git clone https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor.git
+cd Xiaomi-cloud-tokens-extractor
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt    # requests pycryptodome charset-normalizer Pillow colorama
+python token_extractor.py
+# 输入小米账号、密码、服务器区域（中国选 cn）
+# 自动列出所有设备 NAME / ID / MAC / TOKEN / MODEL / IP
 ```
 
-> 也有在线版：https://xiaomi-token-web.asd.workers.dev/
->
 > 备选：`miiocli discover`（仅旧固件）或抓包旧版米家 APK（v5.4.54）。新固件已加密广播包，miiocli 大概率拿不到。
+
+**注意：**
+- 有 IP 的设备是 WiFi 直控（python-miio 可控），无 IP 的 BLE 设备（温湿度计、门锁等）不支持局域网直控
+- 导出的 token 直接填入 `config/devices.yaml`，或使用前端的"粘贴导入"功能（见 DEVPLAN.md）
 
 设备需已绑定米家 App 且与 HomeDash 在同一局域网。
 
