@@ -103,7 +103,9 @@ python token_extractor.py
 | `KUMA_DB_PATH` | `/data/kuma.db` | Uptime Kuma 的 SQLite 文件路径 |
 | `DEVICES_PATH` | `config/devices.yaml` | 米家设备配置文件路径 |
 
-## Docker 一键部署
+## Docker 部署（待实现）
+
+> ⚠️ 尚未提供 Dockerfile，以下为计划中的部署方式。Dockerfile 就绪后按此操作。
 
 ```bash
 git clone https://github.com/yuyuan1019/homedash.git
@@ -126,6 +128,8 @@ docker compose up -d
 docker-compose.yml 会自动读取 `.env` 文件注入环境变量，只需改两个文件：
 - `.env`：环境变量配置
 - `config/devices.yaml`：米家设备配置
+
+> `network_mode: host` 是为了 python-miio 能直接发现和控制局域网设备。不使用米家设备可去掉。
 
 ## 验证
 

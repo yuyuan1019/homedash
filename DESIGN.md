@@ -110,7 +110,7 @@ POST /api/devices/{name}/command    - 自定义命令 {command, params: []}
 **注意：**
 - `Device` 实例缓存在 cfg dict 的 `_inst` 字段，下划线前缀字段在 `/devices` 列表里被过滤掉。
 - 启动双重加载（main.py lifespan + devices.py on_event），无害。
-- 获取 Token 方式：使用 `miiocli` 工具或米家 APK 提取。设备必须同一局域网且已绑定米家 App。
+- 获取 Token：推荐用 [Xiaomi Cloud Tokens Extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor) 登录小米云导出，详见 README.md。设备必须同一局域网且已绑定米家 App。
 
 ### 2. Uptime 监控对接
 

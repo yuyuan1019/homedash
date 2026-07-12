@@ -49,7 +49,7 @@ DESIGN.md 是初版设计，**与代码有出入，以代码为准**：
 
 - 后端 Phase 1+2 已完成（items/devices/uptime 三模块 API 全通）。
 - 前端只有 `app/static/index.html` 骨架，**引用的 `/style.css` 和 `/app.js` 尚未创建**。StaticFiles 挂载在 `/`，所以前端缺失时 API 仍可用，但页面是空的。
-- **没有 Dockerfile / docker-compose.yml**，尽管 DESIGN.md 里写了示例。部署方式待定。
+- **有 docker-compose.yml 但无 Dockerfile**，Docker 部署尚未可用。
 - `requirements.txt` 里**没有 jinja2**（DESIGN 列了但实际没装）。
 
 ## 代码风格约定

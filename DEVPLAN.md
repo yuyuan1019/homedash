@@ -1,6 +1,10 @@
-# HomeDash 前端开发计划（Phase 3）
+# HomeDash 前端开发计划（Phase 3 + 3.5）
 
-> 本文档供 opencode 开发使用。后端 API 已全部就绪，此阶段只做前端：`app/static/style.css` + `app/static/app.js`。
+> ⬜ **本文档是待办规格书，不是已完成记录。** 所有内容均未实现，供 opencode 开发使用。
+>
+> Phase 3：前端页面 `app/static/style.css` + `app/static/app.js`（后端 API 已就绪）
+> Phase 3.5：后端新增设备状态查询、粘贴导入、属性控制端点（需改 `devices.py`）
+>
 > 已有 `app/static/index.html` 骨架，不要改动其结构，只补 CSS 和 JS。
 
 ## 约束
@@ -28,14 +32,40 @@ app/static/
 | 方法 | 路径 | 请求体 | 返回 |
 |------|------|--------|------|
 | GET | `/api/devices` | - | `[{name, model, host, token, type}, ...]`（_inst 等下划线字段已过滤） |
-| GET | `/api/devices/status` | - | `[{name, online, power, ...}, ...]` 批量状态（并发查询，每台 3s 超时） |
+| GET | `/api/devices/status` | - | `[{name, online, power, props: {...}}, ...]` 批量状态（并发查询，每台 3s 超时） |
 | POST | `/api/devices/{name}/on` | - | `{name, power: "on"}` |
 | POST | `/api/devices/{name}/off` | - | `{name, power: "off"}` |
+| PUT | `/api/devices/{name}/props` | `{prop: value}` 如 `{"brightness": 65}` | `{name, prop, value}` |
 | POST | `/api/devices/{name}/command` | `{command: str, params: []}` | `{name, result: ...}` |
 
 注意：设备用 **name**（不是 id）操作。`/devices` 不返回状态，只返回配置。开关失败返回 503。
 
-`/devices/status` 是 Phase 3.5 新增端点，并发查询所有设备状态（`asyncio.gather` + 每台 `asyncio.wait_for` 3s 超时），返回每台设备的 online/power 及可用属性。单台超时不影响其他设备。
+`/devices/status` 和 `/devices/{name}/props` 是 Phase 3.5 新增端点：
+- `/devices/status`：并发查询所有设备（`asyncio.gather` + 每台 `asyncio.wait_for` 3s 超时），返回 online/power 及可控属性（亮度、温度等）。单台超时不影响其他设备。
+- `/devices/{name}/props`：设置单个属性（亮度/温度/模式等），通过 type 查属性命令映射表发送。
+
+**属性命令映射表**（`_PROP_CMDS`，与 `_POWER_CMDS` 同级）：
+
+```python
+# type -> {prop_name: (get_cmd, set_cmd, min, max, step)}
+# ponytail: 按设备类型查表；新类型加一行即可
+_PROP_CMDS = {
+    "light": {
+        "brightness":   ("get_bright", "set_bright", 1, 100, 1),
+        "color_temp":   ("get_ct", "set_ct", 2700, 6500, 100),
+    },
+    "airconditioner": {
+        "temperature":  ("get_temperature", "set_temperature", 16, 30, 1),
+        "mode":         ("get_mode", "set_mode", None, ["auto", "cool", "heat", "fan", "dehumidify"]),
+    },
+    "airpurifier": {
+        "mode":         ("get_mode", "set_mode", None, ["auto", "silent", "favorite", "idle"]),
+        "level":        ("get_level", "set_level", 1, 3, 1),
+    },
+}
+```
+
+> 未在 `_PROP_CMDS` 中的 type 不显示滑块，只有开关按钮。前端根据 `/devices/status` 返回的 `props` 字段动态渲染控件。
 
 ### Uptime 监控
 
@@ -142,58 +172,111 @@ DOWN(离线): #e74c3c
 | 音箱 | speaker | 🔊 | 开关 |
 | 其他 | 兜底 | 📦 | 开关 |
 
-分组布局：
+分组布局（每个设备卡片含开关 + 按类型动态属性控件）：
 ```
-┌─ 💡 灯光 (6) ─────────────────────────────┐
-│  💡 客厅灯     ● 在线  [开][关]           │
-│  💡 浴室灯     ● 在线  [开][关]           │
-│  💡 餐厅灯     ○ 离线  [开][关]           │
-└──────────────────────────────────────────┘
-┌─ ❄️ 空调 (3) ─────────────────────────────┐
-│  ❄️ 卧室空调   ● 在线  [开][关]           │
-│  ❄️ 猫房空调插座 ● 在线  [开][关]         │
-└──────────────────────────────────────────┘
-┌─ 🔌 插座 (1) ─────────────────────────────┐
-│  🔌 主卧左插线板 ● 在线  [开][关]         │
-└──────────────────────────────────────────┘
-...
+┌─ 💡 灯光 (6) ───────────────────────────────────────┐
+│  💡 客厅灯     ● 在线  [开][关]                     │
+│     亮度 ━━━━━━━●━━━━━ 65%   色温 ━━●━━━━━━━ 3500K  │
+│  💡 浴室灯     ● 在线  [开][关]                     │
+│  💡 餐厅灯     ○ 离线  [开][关]                     │
+└─────────────────────────────────────────────────────┘
+┌─ ❄️ 空调 (3) ───────────────────────────────────────┐
+│  ❄️ 卧室空调   ● 在线  [开][关]                     │
+│     温度 ━━━━━●━━━━━━━ 26°C   模式 [制冷 ▾]         │
+│  ❄️ 猫房空调插座 ● 在线  [开][关]                   │
+│     温度 ━━━━━━●━━━━━━ 25°C   模式 [送风 ▾]         │
+└─────────────────────────────────────────────────────┘
+┌─ 🌬️ 空气净化器 (1) ─────────────────────────────────┐
+│  🌬️ 芋圆的空气净化器 ● 在线  [开][关]               │
+│     档位 ━━●━━━━━━━━━ 2    模式 [自动 ▾]            │
+└─────────────────────────────────────────────────────┘
+┌─ 🔌 插座 (1) ───────────────────────────────────────┐
+│  🔌 主卧左插线板 ● 在线  [开][关]                   │
+└─────────────────────────────────────────────────────┘
 ```
 
 每个设备卡片显示：
 - **图标 + 名称**：按 type 匹配 emoji
 - **状态指示**：绿色圆点 ● + "在线"，或灰色圆点 ○ + "离线"
 - **开关按钮**：`[开][关]`，当前 power 状态高亮（power=on 时"开"按钮高亮）
-- **操作后**：toast 提示成功/失败，刷新该设备状态
+- **属性控件**（按 type 动态渲染，仅在线设备显示）：
+  - light：亮度滑块（1-100）+ 色温滑块（2700-6500K）
+  - airconditioner：温度滑块（16-30°C）+ 模式下拉（制冷/制热/自动/送风/除湿）
+  - airpurifier：档位滑块（1-3）+ 模式下拉（自动/静音/最爱/待机）
+  - 其他 type：只有开关，无滑块
+- **滑块交互**：拖动松开后 `PUT /api/devices/{name}/props {"brightness": 65}`，拖动过程实时显示数值，不发请求（防抖）
+- **模式切换**：下拉选择后立即发请求
+- **操作后**：toast 提示成功/失败
 
 交互细节：
 - 开/关按钮：点击 `POST /api/devices/{name}/on` 或 `off`
-- 按钮点击时禁用 + loading 状态（`disabled` + 文字变"..."），防止重复点击
+- 所有按钮点击时禁用 + loading 状态，防止重复点击
 - 设备名含特殊字符时用 `encodeURIComponent(name)`
 - **没有设备时**显示空状态："未配置设备，请点击「粘贴导入」或编辑 config/devices.yaml"
 - `host` 为空的设备显示"⚠ 未配置 IP"标签，开关按钮禁用
 - 顶部操作栏：`[📥 粘贴导入]` `[🔄 刷新状态]`
-- 刷新状态：重新调 `/devices/status`，只更新状态圆点和按钮高亮，不重建列表
+- 刷新状态：重新调 `/devices/status`，只更新状态圆点、按钮高亮和滑块值，不重建列表
 
 **状态查询设计**（后端 `/devices/status`）：
 ```python
 # 并发查所有设备，每台 3s 超时
+def _query_props_sync(cfg):
+    """查询设备 power + 按 type 查 _PROP_CMDS 里的属性。"""
+    result = {"power": None, "props": {}}
+    props_map = _PROP_CMDS.get(cfg.get("type"), {})
+    try:
+        inst = _instance(cfg)
+        # 查 power
+        power = inst.send("get_prop", ["power"])
+        result["power"] = power[0] if isinstance(power, list) else power
+        # 查各属性
+        for prop_name, (get_cmd, _, _, _, _) in props_map.items():
+            try:
+                val = inst.send(get_cmd, [])
+                result["props"][prop_name] = val[0] if isinstance(val, list) else val
+            except Exception:
+                pass  # 该属性不支持，跳过
+        result["online"] = True
+    except Exception:
+        result["online"] = False
+    return {"name": cfg["name"], **result}
+
 async def _query_one(cfg):
     try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(_send, cfg, "get_prop", ["power"]),
+        return await asyncio.wait_for(
+            asyncio.to_thread(_query_props_sync, cfg),
             timeout=3.0
         )
-        return {"name": cfg["name"], "online": True, "power": result}
     except Exception:
-        return {"name": cfg["name"], "online": False, "power": None}
+        return {"name": cfg["name"], "online": False, "power": None, "props": {}}
 
 @router.get("/devices/status")
 async def device_status():
-    tasks = [_query_one(cfg) for cfg in _devices.values()]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    tasks = [_query_one(cfg) for cfg in _devices.values() if cfg.get("host")]
+    return await asyncio.gather(*tasks)
 ```
-> ponytail: `get_prop ["power"]` 是多数 miio 设备通用命令，部分设备可能不支持，不支持的返回 online=True 但 power=None。状态查询是 best-effort，不影响开关操作。
+
+**属性设置端点**（后端 `PUT /devices/{name}/props`）：
+```python
+class PropIn(BaseModel):
+    # 动态键值对，如 {"brightness": 65} 或 {"temperature": 26}
+    # pydantic 不预定义字段，用 model_dump 接收任意键
+    pass
+
+@router.put("/devices/{name}/props")
+async def set_prop(name: str, payload: dict):
+    cfg = _get(name)
+    props_map = _PROP_CMDS.get(cfg.get("type"), {})
+    results = {}
+    for prop, value in payload.items():
+        if prop not in props_map:
+            raise HTTPException(400, f"不支持的属性: {prop}")
+        _, set_cmd, *_ = props_map[prop]
+        await asyncio.to_thread(_send, cfg, set_cmd, [value])
+        results[prop] = value
+    return {"name": name, "props": results}
+```
+> ponytail: `get_prop`/`set_bright` 等是多数 miio 设备通用命令，不同型号可能不同。属性查询/设置是 best-effort，不支持的不显示控件，不影响开关操作。
 
 ### 步骤 4：监控状态 Tab
 
