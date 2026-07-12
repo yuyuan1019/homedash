@@ -140,15 +140,21 @@ function getDeviceEmoji(type) {
   return getGroupInfo(type).icon;
 }
 
-async function toggleDevice(name, turnOn, btn) {
-  btn.disabled = true;
+async function toggleDevice(name, turnOn, inputEl) {
+  if (inputEl) inputEl.disabled = true;
   const url = turnOn ? API.deviceOn(name) : API.deviceOff(name);
   const { ok, data } = await fetchJSON(url, { method: 'POST' });
-  btn.disabled = false;
   if (ok) {
     toast(`${name} 已${turnOn ? '开启' : '关闭'}`, 'success');
-    refreshDeviceStatus();
+    if (!deviceStatusMap[name]) deviceStatusMap[name] = { name };
+    deviceStatusMap[name].online = true;
+    deviceStatusMap[name].power = turnOn ? 'on' : 'off';
+    renderDevices();
   } else {
+    if (inputEl) {
+      inputEl.checked = !turnOn; // 回滚开关
+      inputEl.disabled = false;
+    }
     toast(data?.detail || `${name} 操作失败`, 'error');
   }
 }
@@ -207,32 +213,50 @@ function renderDeviceProps(name, type, props) {
   return '';
 }
 
+function isPowerOn(power) {
+  return power === true || power === 'on' || power === 1 || power === '1' || power === 'true';
+}
+
 function renderDeviceCard(dev) {
   const status = deviceStatusMap[dev.name];
   const online = status?.online;
-  const power = status?.power;
+  const powerOn = isPowerOn(status?.power);
   const noHost = !dev.host;
   const isCloud = dev.did && noHost;  // BLE Mesh 设备走云端
-  const dotClass = online === true ? 'up' : (online === false ? 'down' : 'unknown');
-  const statusText = online === true ? '在线' : (online === false ? '离线' : '未查询');
-  const badge = isCloud ? '<span class="badge badge-ok">☁ 云端控制</span>' :
-    (noHost ? '<span class="badge badge-warn">⚠ 未配置 IP</span>' : '');
+  const statusText = online === true ? '在线' : (online === false ? '离线' : '状态未知');
+  const badge = isCloud ? '<span class="badge badge-cloud">云端</span>' :
+    (noHost ? '<span class="badge badge-warn">无 IP</span>' : '');
   const disabled = noHost && !isCloud;
+  const tileClass = [
+    'device-tile',
+    powerOn ? 'on' : 'off',
+    online === false ? 'offline' : '',
+  ].filter(Boolean).join(' ');
+
+  // 属性控件：仅在线且非云端时展示（props 后端仍可能 404，前端已降级）
+  const propsHtml = (!isCloud && online) ? renderDeviceProps(dev.name, dev.type, status?.props || {}) : '';
+  // 双列时属性会撑高，有 props 的卡占满一行
+  const spanStyle = propsHtml ? ' style="grid-column: 1 / -1;"' : '';
 
   return `
-    <div class="device-card" data-name="${dev.name}">
-      <div class="device-info">
-        <div class="device-name">${getDeviceEmoji(dev.type)} ${dev.name}</div>
+    <div class="${tileClass}" data-name="${dev.name}"${spanStyle}>
+      <div class="device-tile-top">
+        <div class="device-icon ${powerOn ? 'on' : ''}">${getDeviceEmoji(dev.type)}</div>
+        <label class="switch" title="${disabled ? '不可控' : (powerOn ? '关闭' : '开启')}">
+          <input type="checkbox" class="power-switch" data-name="${dev.name}"
+            ${powerOn ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div>
+        <div class="device-name">${dev.name}</div>
         <div class="device-meta">
-          <span class="status-dot ${dotClass}"></span>${statusText}
+          <span class="status-dot ${online === true ? 'up' : (online === false ? 'down' : 'unknown')}"></span>
+          ${statusText}
           ${badge}
         </div>
+        ${propsHtml}
       </div>
-      <div class="device-controls">
-        <button class="btn btn-small toggle-btn ${power === 'on' ? 'active' : ''}" ${disabled ? 'disabled' : ''} data-action="on" data-name="${dev.name}">开</button>
-        <button class="btn btn-small toggle-btn ${power === 'off' ? 'active' : ''}" ${disabled ? 'disabled' : ''} data-action="off" data-name="${dev.name}">关</button>
-      </div>
-      ${!isCloud && online ? renderDeviceProps(dev.name, dev.type, status?.props || {}) : ''}
     </div>`;
 }
 
@@ -265,15 +289,17 @@ function renderDevices() {
   let html = `
     <div class="toolbar">
       <button class="btn" id="import-btn">📥 粘贴导入</button>
-      <button class="btn" id="refresh-status-btn">🔄 刷新状态</button>
+      <button class="btn" id="refresh-status-btn">刷新状态</button>
     </div>`;
 
   sortedKeys.forEach((key) => {
     const g = groups[key];
     html += `
       <div class="group">
-        <div class="group-title">${g.info.icon} ${g.info.label} (${g.items.length})</div>
-        ${g.items.map(renderDeviceCard).join('')}
+        <div class="group-title">${g.info.icon} ${g.info.label} · ${g.items.length}</div>
+        <div class="device-grid">
+          ${g.items.map(renderDeviceCard).join('')}
+        </div>
       </div>`;
   });
 
@@ -284,11 +310,10 @@ function renderDevices() {
 }
 
 function bindDeviceEvents() {
-  document.querySelectorAll('#tab-devices .toggle-btn').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
+  document.querySelectorAll('#tab-devices .power-switch').forEach((input) => {
+    input.addEventListener('change', (e) => {
       const name = e.target.dataset.name;
-      const action = e.target.dataset.action;
-      toggleDevice(name, action === 'on', e.target);
+      toggleDevice(name, e.target.checked, e.target);
     });
   });
 
