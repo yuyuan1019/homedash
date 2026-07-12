@@ -575,9 +575,10 @@ GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
 - 过期标红；点圆圈完成
 - 中文 + 米家浅色风格
 
-### 8.6 与语音 / LLM（可选二期）
+### 8.6 与 AI 工作台（待办 7）
 
-待办 7 可扩展：`create_todo` / `complete_todo` / `set_remind`。本期不强制。
+AI 工作台一期即包含 `todo.create` / `todo.complete` / `todo.update` 等 op，与本模块执行器对接。  
+表单 CRUD 与 AI 写库**共用**同一套 todos API/内部函数，避免两套逻辑。
 
 ### 8.7 实现文件（预估）
 
@@ -618,167 +619,294 @@ curl -s -X POST http://127.0.0.1:8088/api/agent/todos/1/remind-fired \
 
 面板能完成 CRUD；due 在到点返回且 fired 后不再重复（once）。
 
-## 待办 7：语音 / 自然语言记账（STT + **LLM 解析** → 库存变更）— **规格，尚未开发**
+## 待办 7：AI 工作台（自然语言 → 结构化写库）— **规格，尚未开发**
 
-**难度**：★★★☆☆  
-**目标**：日用品页「🎤 语音记账」；说话或打字后，由 **LLM** 理解意图并生成结构化操作，用于**新增 / 修改库存**（购买、消耗、必要时新建条目）。  
-**已定方案**：**LLM 负责意图与槽位解析**（不是可有可无）；STT 仍可先用浏览器或后端。
+**难度**：★★★★☆  
+**定位（已定）**：不是「仅语音记一笔库存」，而是面板上的 **AI 工作台**：用户用**打字或语音**下指令，大模型理解后生成**白名单结构化动作**，由 HomeDash **校验并写 SQLite**（库存、待办等）。  
+**一句话**：人话操作数据库的工作台；**LLM 从不直接执行 SQL**。
 
-### 7.1 用户体验
+### 7.0 与旧描述的关系
 
-1. 日用品 Tab → **🎤 语音记账**（或「输入一句话」降级）
-2. 示例：
-   - `加 10 包方便面` → 匹配或新建「方便面」，purchase +10
-   - `用掉 2 卷卫生纸` → usage -2
-   - `猫粮还剩大概 3 袋，改成 3` → 直接改 `current_stock`（set）
-   - `把湿巾的单位改成包` → 改字段（可选，二期）
-3. 展示：识别文本 + LLM 解析预览（可编辑）→ **确认写入**
-4. toast：`方便面 +10 包（购买），库存 12`
+| 旧说法 | 现规格 |
+|--------|--------|
+| 日用品页 🎤 语音记账 | 升级为独立 **「AI」Tab / 工作台**（可从各 Tab 唤起） |
+| 只改库存 | **统一动作总线**：items + todos（+ 可扩展） |
+| 语音为主 | **文本为主，语音为输入手段之一**（STT → 同一套 parse/apply） |
 
-### 7.2 架构（已定：LLM 解析）
+### 7.1 产品形态（工作台 UI）
+
+建议第五入口或第四之后：`设备 | 监控 | 日用品 | 待办 | **AI**`（实现时 Tab 名「AI」或「助手」）。
+
+**布局（米家浅色一致）：**
 
 ```
-麦克风 / 文本框
-    │
-    ▼
-[STT] 语音 → 文字
-    │  优先：浏览器 Web Speech API（Chrome 中文）
-    │  备选：后端 Whisper / OpenAI-compatible STT
-    ▼
-[LLM] 文字 + 当前物品清单 → 结构化 JSON 指令
-    │  OpenAI-compatible Chat Completions
-    │  （可用用户已有的 New API / 任意兼容端点）
-    ▼
-[预览确认] 前端展示 actions[]
-    ▼
-[执行] 服务端按 JSON 调 create / purchase / usage / patch stock
+┌─────────────────────────────────────────┐
+│ AI 工作台                    [清空会话]  │
+├─────────────────────────────────────────┤
+│ 快捷芯片：加库存 | 记消耗 | 新建待办 |    │
+│           完成待办 | 查需买 | 查待办      │
+├─────────────────────────────────────────┤
+│ 对话/指令区（可多轮短上下文，默认近 5 轮）│
+│  你：加 10 包方便面，再记一个换滤芯待办  │
+│  AI：将执行 2 步… [预览卡片]             │
+├─────────────────────────────────────────┤
+│ [预览 actions 列表 · 可勾选/改数字]      │
+│ [取消]  [确认写入数据库]                 │
+├─────────────────────────────────────────┤
+│ [输入框…………] [🎤] [发送]                 │
+└─────────────────────────────────────────┘
 ```
 
-**职责划分：**
+**交互原则：**
 
-| 步骤 | 谁做 | 说明 |
-|------|------|------|
-| 语音→文字 | STT | 不要求聊天模型做 ASR（除非端点同时支持 audio） |
-| 文字→改库存意图 | **LLM（必选）** | 中文口语、别名、多物品一句话 |
-| 真正写库 | HomeDash 后端 | **LLM 不直连数据库**；只产出 JSON，服务端校验后执行 |
+1. 用户输入（文本或 STT 文本）→ `POST /api/ai/parse`
+2. 工作台展示 `display` + 每条 action 的人话说明；**默认可编辑**
+3. 用户点 **确认写入** → `POST /api/ai/apply`（可只 apply 勾选的子集）
+4. `AI_CONFIRM_REQUIRED=false` 时可自动 apply（仅建议内网 + 高 confidence）
+5. 每次 apply 写 **审计日志**（见 7.6），方便回查「AI 改过什么」
 
-### 7.3 LLM 输入 / 输出约定
+**示例指令（必须能覆盖）：**
 
-**请求侧塞给模型的上下文（每次）：**
+| 用户说 | 期望动作 |
+|--------|----------|
+| 加 10 包方便面 | items: purchase / create_and_purchase |
+| 用掉 2 卷卫生纸 | items: usage |
+| 猫粮改成 3 袋 | items: set_stock |
+| 添加待办：周末换净水器滤芯，高优先级，7 月 31 截止 | todos: create |
+| 把「换滤芯」标完成 | todos: complete |
+| 明天下午 3 点 QQ 提醒我交物业费 | todos: create + remind_at/channels |
+| 现在有什么要买的 / 未完成待办 | **只读查询** query_need_buy / query_open_todos（不写库） |
 
-- 用户原话 `text`
-- 现有物品精简列表：`[{id, name, unit, category, current_stock}, ...]`（控制 token，名称优先）
-- 系统提示：只允许输出 JSON；动作枚举见下；匹配已有名称优先；没有则 `create: true`
+### 7.2 架构（工具型写库，不是 ChatOps 裸 SQL）
 
-**模型输出 JSON Schema（服务端严格校验）：**
+```
+用户（文本 / 语音 STT）
+        │
+        ▼
+┌───────────────────┐
+│  AI 工作台前端     │
+└─────────┬─────────┘
+          │ parse / apply
+          ▼
+┌───────────────────┐     OpenAI-compatible
+│  app/modules/ai_workbench.py
+│  - 拼系统提示 + 当前快照（items/todos 摘要）
+│  - 调 LLM → 仅允许 JSON actions
+│  - Schema 校验 + 业务校验
+└─────────┬─────────┘
+          │ apply
+          ▼
+┌───────────────────┐
+│  领域执行器（白名单）│
+│  items CRUD/logs    │
+│  todos CRUD/remind  │
+│  （禁止任意 SQL）    │
+└───────────────────┘
+          │
+          ▼
+     SQLite homedash.db
+```
+
+| 步骤 | 谁做 |
+|------|------|
+| 语音→文字 | STT（可选） |
+| 文字→结构化意图 | **LLM（工作台核心）** |
+| 真正改库 | **服务端执行器**，只跑白名单 action |
+| 设备开关 miio | **默认不进 AI 工作台一期**（误触风险高；二期再加 confirm 双确认） |
+
+### 7.3 统一 Action 协议（跨库存 + 待办）
+
+LLM **只输出**如下 JSON（服务端 `json.loads` + 字段白名单）：
 
 ```json
 {
+  "reply": "将为你加 10 包方便面，并新建待办「换滤芯」。",
+  "confidence": "high | medium | low",
   "actions": [
     {
-      "action": "purchase | usage | set_stock | create_and_purchase",
-      "item_id": 3,
+      "op": "item.purchase",
       "name": "方便面",
+      "item_id": null,
       "amount": 10,
       "unit": "包",
       "category": "冷冻",
-      "note": "可选",
-      "create": false
+      "create_if_missing": true,
+      "note": null
+    },
+    {
+      "op": "todo.create",
+      "title": "换净水器滤芯",
+      "priority": "high",
+      "due_date": "2026-07-31",
+      "assignee": "双方",
+      "remind_at": null,
+      "remind_channels": ["qq"],
+      "note": "柜下 3M"
     }
-  ],
-  "display": "方便面 +10 包（购买）",
-  "confidence": "high | medium | low"
+  ]
 }
 ```
 
-**动作语义：**
+#### 7.3.1 写操作白名单（一期）
 
-| action | 行为 |
-|--------|------|
-| `purchase` | 已有物品：加库存 + purchase_logs |
-| `usage` | 已有物品：减库存 + usage_logs |
-| `set_stock` | 直接把 `current_stock` 设为 amount（盘点：「改成 3 袋」） |
-| `create_and_purchase` | 新建物品再 purchase；`create: true` |
+| op | 含义 | 执行 |
+|----|------|------|
+| `item.purchase` | 入库/购买 | 匹配或创建 item → +stock + purchase_log |
+| `item.usage` | 消耗 | 匹配 item → -stock + usage_log |
+| `item.set_stock` | 盘点改库存 | 匹配 item → 直接设 current_stock |
+| `item.create` | 只建条目不改数量 | insert items |
+| `item.update` | 改 name/unit/category/min_stock | update 白名单列 |
+| `todo.create` | 新建重点待办 | insert todos（可含 remind_*） |
+| `todo.complete` | 完成 | status=done |
+| `todo.reopen` | 重开 | status=open |
+| `todo.update` | 改标题/优先级/截止/提醒 | update 白名单列 |
+| `todo.delete` | 删除 | 需 `confidence=high` 且默认仍要用户确认 |
 
-**服务端硬校验（防胡写）：**
+#### 7.3.2 只读操作（可直接返回，不必 apply）
 
-- `action` 必须在白名单
-- `amount` 必须为有限正数（`set_stock` 允许 0）
-- `item_id` 若给了必须存在；不存在则按 `name` 再匹配
-- 单次 `actions` 最多 N 条（如 5），防止一次清空库存
-- LLM 超时 / 非 JSON → 返回错误，**不写库**
-- 可选：规则解析做 fallback（LLM 挂了还能用简单句）；默认仍以 LLM 为主
+| op | 含义 |
+|----|------|
+| `query.need_buy` | 需购买日用品列表 |
+| `query.items` | 按名称搜库存 |
+| `query.open_todos` | 未完成待办 |
+| `query.overdue_todos` | 过期待办 |
 
-### 7.4 配置（OpenAI-compatible）
+只读 op 在 `parse` 响应里可带 `results` 快照；**不进入 apply 写库**。
 
-| 变量 | 说明 |
-|------|------|
-| `LLM_BASE_URL` | 如 `https://api.openai.com/v1` 或家中 New API 地址 |
-| `LLM_API_KEY` | Bearer Key |
-| `LLM_MODEL` | 如 `gpt-4o-mini` / 用户自选小模型 |
-| `LLM_TIMEOUT_SEC` | 默认 30 |
-| `VOICE_CONFIRM_REQUIRED` | 默认 `true`（必须确认再 apply） |
+#### 7.3.3 硬校验（防胡写库）
 
-依赖：已有 `httpx`，足够调 Chat Completions；**不**把大模型打进 Docker 镜像。
+- `op` 必须在白名单；未知 op → 整单拒绝或剥离该条
+- 单次 `actions` 最多 **8** 条
+- `amount` 有限数字；usage/purchase > 0；set_stock ≥ 0
+- `item_id` / `todo_id` 存在性校验；名称模糊匹配唯一性（多候选 → 返回 `needs_disambiguation`，不写库）
+- **禁止** LLM 输出 SQL / 表名 / 路径
+- 超时、非 JSON、缺字段 → 不写库，工作台显示错误
+- `todo.delete`、批量 usage 清空类：强制确认
 
-### 7.5 API
+### 7.4 上下文快照（给模型，控制 token）
+
+每次 parse 服务端组装 **只读摘要**（截断）：
+
+```json
+{
+  "items": [{"id":1,"name":"方便面","unit":"包","stock":2,"category":"冷冻"}, ...],  // 最多 80 条，优先名称命中
+  "todos_open": [{"id":3,"title":"换滤芯","priority":"high","due_date":"2026-07-31"}, ...],  // 最多 30
+  "today": "2026-07-13",
+  "tz": "Asia/Shanghai"
+}
+```
+
+**禁止**进入 prompt：`.env`、SMTP 密码、LLM key、设备 token、`devices.yaml`、xiaomi 凭据。
+
+系统提示要点：
+
+- 你是 HomeDash 家庭数据操作助手
+- 只能输出规定 JSON
+- 优先匹配已有 id；没有则 create_if_missing
+- 不闲聊；`reply` 一两句中文说明将执行的操作
+
+### 7.5 HTTP API
 
 ```http
-# 预览：STT 后的 text，或用户手打
-POST /api/items/voice/parse
-{"text": "加 10 包方便面"}
+# 解析（不写库）
+POST /api/ai/parse
+{
+  "text": "加 10 包方便面，并添加待办换滤芯",
+  "session_id": "optional-uuid"
+}
 
 → {
   "ok": true,
-  "source": "llm",
-  "raw_text": "加 10 包方便面",
-  "actions": [...],
-  "display": "方便面 +10 包（购买）",
-  "confidence": "high"
+  "reply": "...",
+  "confidence": "high",
+  "actions": [ ... ],
+  "read_results": null,
+  "needs_disambiguation": null
 }
 
-# 确认执行（可回传 parse 的 actions，避免二次 LLM）
-POST /api/items/voice/apply
-{"actions": [...], "raw_text": "..."}
-→ {"ok": true, "results": [{"item_id": 3, "current_stock": 12, "created": false}]}
+# 确认执行（写库）
+POST /api/ai/apply
+{
+  "actions": [ ... ],          // 前端可改过的最终列表
+  "raw_text": "...",
+  "session_id": "optional-uuid"
+}
 
-# 可选 STT
-POST /api/items/voice/transcribe  (multipart audio)
-→ {"text": "..."}
+→ {
+  "ok": true,
+  "results": [
+    {"op":"item.purchase","ok":true,"item_id":1,"current_stock":12},
+    {"op":"todo.create","ok":true,"todo_id":9}
+  ]
+}
+
+# 可选：语音转文字（再走 parse）
+POST /api/ai/transcribe  multipart audio → {"text":"..."}
+
+# 可选：审计
+GET /api/ai/audit?limit=50
 ```
 
-前端也可：Web Speech 得到 text → 只调 `parse` / `apply`。
+兼容别名（若已有文档引用）：`/api/items/voice/parse` 可 308 到 `/api/ai/parse` 或薄封装只允许 item.* ops。
 
-### 7.6 前端
+### 7.6 审计表（建议）
 
-- 🎤 按钮 + 识别中状态
-- 解析预览 sheet：展示 LLM `display` 与可编辑 JSON/表单项
-- 确认后 `apply`
-- 无麦克风：同一套「打一句话」
-- LLM 未配置时：按钮提示「未配置 LLM_BASE_URL」，不静默失败
+```sql
+CREATE TABLE IF NOT EXISTS ai_audit (
+    id INTEGER PRIMARY KEY,
+    raw_text TEXT,
+    actions_json TEXT,
+    results_json TEXT,
+    ok INTEGER,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+```
 
-### 7.7 安全与坑
+### 7.7 配置
 
-- 家庭内网无登录；LLM Key 只放服务端 `.env`
-- **禁止**把完整 `.env`、SMTP 密码、设备 token 塞进 LLM 上下文；只传物品名/库存等必要字段
-- 默认确认写入；`confidence=low` 时强制确认
-- Gmail 与 LLM 都依赖出网；透明代理环境需保证容器能访问 `smtp.gmail.com` 与 `LLM_BASE_URL`
-- 局域网 HTTP 麦克风限制：文档说明 + 文本降级
+| 变量 | 说明 |
+|------|------|
+| `LLM_BASE_URL` | OpenAI-compatible，如家中 New API |
+| `LLM_API_KEY` | |
+| `LLM_MODEL` | |
+| `LLM_TIMEOUT_SEC` | 默认 30 |
+| `AI_CONFIRM_REQUIRED` | 默认 `true` |
+| `AI_MAX_ACTIONS` | 默认 8 |
+| `AI_ENABLED` | 默认 true；false 时工作台提示未开启 |
+
+依赖：现有 `httpx`；不把模型打进镜像。
 
 ### 7.8 实现文件（预估）
 
-- `app/modules/voice_llm.py`：拼 prompt、调 LLM、校验 JSON
-- `app/modules/items.py` 或独立路由：parse / apply 执行器
-- `app/static/app.js` + `style.css`：🎤 UI
-- `.env.example`：Gmail + LLM 变量
-- 自检：mock LLM 返回固定 JSON 时 apply 路径正确；非法 action 拒绝
+- `app/modules/ai_workbench.py`：prompt、LLM 调用、校验
+- `app/modules/ai_executor.py`：按 op 调 items/todos 内部函数
+- `app/database.py`：`ai_audit` 表
+- `app/static/*`：AI Tab 工作台 UI
+- `.env.example`、README「AI 工作台」
+- 自检：mock LLM JSON → apply 改库断言；非法 op 拒绝
 
-### 7.9 明确不做（本期）
+### 7.9 明确不做（一期）
 
-- 不做多轮闲聊管家
-- 不做声纹 / 多用户权限
-- 不做默认镜像内置本地 7B 模型
-- LLM **不**直接执行 SQL
+- **不做** LLM 直接 `execute_sql` / ORM 任意查询
+- **不做** 用 AI 关灯开空调（设备控制另议）
+- 不做多用户权限 / 声纹
+- 不做镜像内置本地 7B
+- 不做无限多轮闲聊（短上下文即可）
+
+### 7.10 验收话术
+
+```text
+1. 工作台输入：加 10 包方便面
+   → 预览 item.purchase → 确认 → 库存 +10，有 purchase 记录
+
+2. 输入：添加高优先级待办「给猫打疫苗」截止下月底
+   → todo.create → 确认 → /api/todos 可见
+
+3. 输入：现在有什么要买的
+   → query.need_buy 只读展示，无 apply 写库
+
+4. 模型返回非法 op 或 SQL 字符串 → 拒绝，库不变
+```
 
 ---
 
@@ -799,7 +927,7 @@ POST /api/items/voice/transcribe  (multipart audio)
 | 1 | 0 预测 EWMA | 大批量登记后收益最大 |
 | 2 | **8 重点待办 + agent 接口** | 周报与 QQ/微信提醒的数据源；`/api/agent/todos/due` |
 | 3 | **6 Gmail 周报**（库存 + 重点待办） | 依赖 8；通道 Gmail |
-| 4 | 7 语音 + LLM 解析写库存 | 体验核心；可二期挂 create_todo |
-| 5 | home agent 侧 cron 调 due → QQ/微信 | HomeDash 接口就绪后，在 Hermes 配定时任务 |
+| 4 | **7 AI 工作台**（自然语言写库存/待办） | 统一人话操作 DB；白名单 action，非裸 SQL |
+| 5 | home agent 侧 cron 调 due → QQ/微信 | HomeDash 接口就绪后配 |
 | 6 | 1 Docker 验收 / 2 灯光 props | 按需 |
 | 推迟 | 4 粘贴导入 | 仍推迟 |
