@@ -3,19 +3,30 @@
 ## 概述
 
 一个轻量自托管 Web 应用，整合三个功能模块：
-1. **米家设备控制** — 局域网直控灯/空调等
-2. **Uptime 监控** — 对接已有 Uptime Kuma，展示心跳状态
-3. **日用品管理** — 记录消耗/购买，预测下次购买时间
+1. **米家设备控制** - python-miio 局域网直控灯/空调/插座等
+2. **Uptime 监控** - 直读 Uptime Kuma 的 SQLite，展示心跳状态
+3. **日用品管理** - 记录消耗/购买，线性预测下次购买时间
+
+## 当前状态
+
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| Phase 1 | 后端骨架 + 数据库 + items 模块 | ✅ 完成 |
+| Phase 2 | devices + uptime 模块 | ✅ 完成 |
+| Phase 3 | 前端页面 (style.css + app.js) | ⬜ 待开发 |
+| Phase 4 | Docker 部署 | ⬜ 待定 |
+
+后端三模块 API 已全部可用。前端只有 `app/static/index.html` 骨架，引用的 `/style.css` 和 `/app.js` 尚未创建。StaticFiles 挂载在 `/`，前端缺失时 API 仍可正常访问。
 
 ## 技术选型
 
 | 层 | 选择 | 理由 |
 |----|------|------|
-| 后端 | FastAPI + SQLite | 轻量、用户偏好 SQLite |
+| 后端 | FastAPI + aiosqlite | 轻量、无 ORM、全裸 SQL |
 | 米家控制 | `python-miio` | 局域网直控，不走云，无需 HA |
-| Uptime 对接 | 读 Uptime Kuma SQLite 或调 Push API | 避开 Socket.IO 复杂性 |
-| 前端 | 单页 HTML + vanilla JS | 无构建步骤，中文化 |
-| 部署 | Docker Compose 单容器 | 与现有 homelab 统一 |
+| Uptime 对接 | 直读 Kuma SQLite（只读 uri） | 避开 Socket.IO 复杂性，无锁竞争 |
+| 前端 | 单页 HTML + vanilla JS | 无构建步骤，无框架，中文 UI |
+| 部署 | 待定（Docker 或裸跑） | DESIGN 中有示例但尚未实现 |
 
 ## 架构
 
@@ -30,20 +41,33 @@
 ┌───────┼──────────┼──────────┼────────────────┐
 │       ▼          ▼          ▼   FastAPI       │
 │  ┌─────────┐ ┌────────┐ ┌──────────────────┐ │
-│  │miio 控制 │ │Kuma API│ │ 日用品 CRUD+预测  │ │
+│  │miio 控制 │ │Kuma DB │ │ 日用品 CRUD+预测  │ │
 │  └────┬────┘ └───┬────┘ └────────┬─────────┘ │
 │       │          │               │            │
 │       ▼          ▼               ▼            │
 │   米家设备    Uptime Kuma     SQLite          │
-│  (局域网)     (HTTP API)    (homedash.db)     │
+│  (局域网)     (SQLite 只读)  (homedash.db)    │
 └───────────────────────────────────────────────┘
 ```
+
+## 依赖清单
+
+```
+fastapi
+uvicorn[standard]
+python-miio
+pyyaml
+httpx
+aiosqlite
+```
+
+共 6 个依赖。没有前端框架，没有 ORM，没有 Redis，没有 jinja2。
 
 ## 模块设计
 
 ### 1. 米家设备控制
 
-**方案：** `python-miio` 局域网直控
+**方案：** `python-miio` 局域网直控，原始命令透传
 
 **设备配置（YAML）：**
 ```yaml
@@ -53,74 +77,84 @@ devices:
     host: 192.168.1.100
     token: <32位hex token>
     type: light
-    actions: [power, brightness, color_temp]
   - name: 卧室空调
     model: zhimi.aircondition.v1
     host: 192.168.1.101
     token: <32位hex token>
     type: airconditioner
-    actions: [power, temperature, mode]
+  - name: 客厅插座
+    model: chuangmi.plug.m1
+    host: 192.168.1.102
+    token: <32位hex token>
+    type: plug
 ```
+
+**命令映射表（`_POWER_CMDS`）：** 按 `type` 查开关命令，新设备类型加一行即可。`_DEFAULT` 兜底 `set_power`。
+
+| type | 开 | 关 |
+|------|-----|-----|
+| light | `set_power ["on"]` | `set_power ["off"]` |
+| plug | `set_on []` | `set_off []` |
+| outlet | `set_on []` | `set_off []` |
+| airconditioner | `set_power ["on"]` | `set_power ["off"]` |
+| (其他) | `set_power ["on"]` | `set_power ["off"]` |
 
 **API 端点：**
 ```
-GET  /api/devices          — 设备列表 + 当前状态
-POST /api/devices/{id}/on  — 开
-POST /api/devices/{id}/off — 关
-POST /api/devices/{id}     — 自定义命令 (亮度/温度等)
+GET  /api/devices                   - 设备列表（不含 _inst 内部字段，不查状态）
+POST /api/devices/{name}/on         - 开
+POST /api/devices/{name}/off        - 关
+POST /api/devices/{name}/command    - 自定义命令 {command, params: []}
 ```
 
-**获取 Token 方式：** 使用 `miiocli` 工具或米家 APK 提取
-
-**注意：** 设备必须在同一局域网，且已绑定米家 App（token 从中提取）
+**注意：**
+- `Device` 实例缓存在 cfg dict 的 `_inst` 字段，下划线前缀字段在 `/devices` 列表里被过滤掉。
+- 启动双重加载（main.py lifespan + devices.py on_event），无害。
+- 获取 Token 方式：使用 `miiocli` 工具或米家 APK 提取。设备必须同一局域网且已绑定米家 App。
 
 ### 2. Uptime 监控对接
 
-**方案：** 调用 Uptime Kuma 的 REST API
+**方案：** 直读 Uptime Kuma 的 SQLite 数据库文件
 
-已有 Uptime Kuma 运行中，两种对接方式：
-
-| 方式 | 优点 | 缺点 |
-|------|------|------|
-| **A. HTTP 健康检查** | 最简单，直接 curl 各监控目标的 status | 无法获取 Kuma 内部状态 |
-| **B. 读 Kuma SQLite** | 数据最全 | 文件锁竞争风险 |
-
-**推荐方案 A：** 用 Kuma 的 status page API（如果开了公开状态页）或 Prometheus metrics 端点
-
-```
-GET /api/uptime/status — 返回所有监控项的 up/down + 响应时间
+```python
+# 只读 uri 模式，避免锁竞争
+sqlite3.connect(f"file:{KUMA_DB_PATH}?mode=ro", uri=True)
 ```
 
-后端定期（每 60s）轮询 Uptime Kuma 状态页，缓存结果
+查询 `monitor` 表 + 最新 `heartbeat` 记录，60 秒缓存，读失败保留旧缓存。
 
-### 3. 日用品管理（核心功能）
+**API 端点：**
+```
+GET /api/uptime/status - 返回所有监控项的 up/down + 响应时间 + 可用性标记
+```
+
+**环境变量：** `KUMA_DB_PATH`，默认 `/data/kuma.db`（容器内路径）。
+
+### 3. 日用品管理
 
 **数据模型：**
 
 ```sql
--- 日用品清单
-CREATE TABLE items (
+CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,           -- 如：卫生纸、洗洁精、牙膏
     category TEXT,                -- 分类：清洁/洗护/厨房/其他
     unit TEXT DEFAULT '个',       -- 计量单位
     current_stock REAL DEFAULT 0, -- 当前库存
-    min_stock REAL DEFAULT 1,     -- 最低库存（低于此值提醒）
+    min_stock REAL DEFAULT 1,     -- 最低库存
     created_at TEXT DEFAULT (datetime('now'))
 );
 
--- 用量记录（每周/不定期填写）
-CREATE TABLE usage_logs (
+CREATE TABLE IF NOT EXISTS usage_logs (
     id INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL,
     amount REAL NOT NULL,         -- 本次消耗量
-    logged_at TEXT DEFAULT (datetime('now')),  -- 消耗日期
-    note TEXT,                    -- 备注
+    logged_at TEXT DEFAULT (datetime('now')),
+    note TEXT,
     FOREIGN KEY (item_id) REFERENCES items(id)
 );
 
--- 购买记录
-CREATE TABLE purchase_logs (
+CREATE TABLE IF NOT EXISTS purchase_logs (
     id INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL,
     amount REAL NOT NULL,         -- 购买数量
@@ -131,42 +165,31 @@ CREATE TABLE purchase_logs (
 );
 ```
 
-**预测算法：**
+**预测算法（纯函数 `predict_item`）：**
 
 ```
-1. 取该物品最近 N 条用量记录（默认全部）
-2. 计算日均消耗率 = 总消耗量 / 跨度天数
+1. 取该物品全部用量记录
+2. 计算日均消耗率 = 总消耗量 / 跨度天数（单条记录跨度按 1 天兜底）
 3. 预计耗尽日期 = 当前日期 + 当前库存 / 日均消耗率
-4. 若预计耗尽日期 < 7天 → 标记"需要购买"
-5. 建议购买数量 = 日均消耗率 × 目标周期(如30天) - 当前库存
-   （向上取整到常见包装规格）
+4. 若预计耗尽天数 < 7天 -> 标记"需要购买"
+5. 建议购买数量 = ceil(日均消耗率 × 30 - 当前库存)，仅需要购买时非零
+6. 无用量记录时返回空预测（daily_rate=0），不报错
 ```
 
-**算法特点：** 线性回归，够用就行。不搞 ARIMA/LSTM。
+**常量：** `BUY_THRESHOLD=7`（天）、`TARGET_DAYS=30`（建议购买覆盖周期）
+
+**库存方向：** `/usage` 减库存，`/purchase` 加库存。
 
 **API 端点：**
 ```
-GET    /api/items                    — 物品列表 + 预测信息
-POST   /api/items                    — 添加物品
-PUT    /api/items/{id}               — 编辑物品
-DELETE /api/items/{id}               — 删除物品
-POST   /api/items/{id}/usage         — 记录消耗
-POST   /api/items/{id}/purchase      — 记录购买
-GET    /api/items/{id}/history       — 历史（用量+购买）
-GET    /api/items/predictions        — 全部预测汇总 + 购买建议
-```
-
-**前端交互流程：**
-```
-[物品列表页]
-  ├─ 每个物品卡片：名称 | 库存 | 预计耗尽 | 状态标签(充足/低/紧急)
-  ├─ 点击物品 → 详情页（历史曲线 + 记录入口）
-  ├─ [记录消耗] 按钮 → 输入数量 → 自动更新库存和预测
-  ├─ [记录购买] 按钮 → 输入数量+价格 → 自动更新库存
-  └─ [购买清单] 页 → 汇总所有需要买的物品 + 建议数量
-
-[每周提醒]（可选 cron）
-  └─ 每周日推送"本周需要补货的物品"清单
+GET    /api/items                    - 物品列表 + 预测信息
+POST   /api/items                    - 添加物品
+PUT    /api/items/{id}               - 编辑物品
+DELETE /api/items/{id}               - 删除物品
+POST   /api/items/{id}/usage         - 记录消耗（减库存）
+POST   /api/items/{id}/purchase      - 记录购买（加库存）
+GET    /api/items/{id}/history       - 历史记录（用量+购买，按时间排序）
+GET    /api/items/predictions        - 全部预测汇总 {need_buy, sufficient}
 ```
 
 ## 前端页面布局
@@ -189,7 +212,7 @@ GET    /api/items/predictions        — 全部预测汇总 + 购买建议
 │  │  ● LubeLogger     100%    12ms         │  │
 │  │  ● New API        99.5%   45ms         │  │
 │  │  ● Uptime Kuma    100%    8ms          │  │
-│  │  ✕ Beszel         DOWN    —            │  │
+│  │  ✕ Beszel         DOWN    -            │  │
 │  └────────────────────────────────────────┘  │
 │                                              │
 │  ┌─ Tab 3: 日用品 ────────────────────────┐  │
@@ -212,40 +235,28 @@ GET    /api/items/predictions        — 全部预测汇总 + 购买建议
 
 ```
 homedash/
-├── docker-compose.yml
-├── Dockerfile
 ├── requirements.txt
 ├── config/
-│   └── devices.yaml          # 米家设备配置
+│   ├── devices.yaml.example   # 米家设备配置模板
+│   └── devices.yaml           # 真实配置（含 token，勿提交）
 ├── app/
-│   ├── main.py               # FastAPI 入口
-│   ├── database.py           # SQLite 连接 + 表初始化
+│   ├── main.py                # FastAPI 入口
+│   ├── database.py            # SQLite 连接 + 表初始化
 │   ├── modules/
-│   │   ├── devices.py        # 米家设备控制
-│   │   ├── uptime.py         # Uptime Kuma 对接
-│   │   └── items.py          # 日用品 CRUD + 预测
+│   │   ├── devices.py         # 米家设备控制
+│   │   ├── uptime.py          # Uptime Kuma 对接
+│   │   └── items.py           # 日用品 CRUD + 预测
 │   └── static/
-│       ├── index.html        # 单页前端
-│       ├── style.css
-│       └── app.js
+│       ├── index.html         # 单页前端骨架（已有）
+│       ├── style.css          # ⬜ 待创建
+│       └── app.js             # ⬜ 待创建
 └── data/
-    └── homedash.db           # SQLite 数据库（挂载）
+    └── homedash.db            # SQLite 数据库（首次运行自动建表）
 ```
 
-## 依赖清单
+## 部署方式（待实现）
 
-```
-fastapi
-uvicorn[standard]
-python-miio
-pyyaml
-httpx          # 调 Kuma API
-jinja2         # 模板（可选，也可纯静态）
-```
-
-共 6 个依赖，没有前端框架，没有 ORM，没有 Redis。
-
-## 部署方式
+通过环境变量配置，不硬编码路径。`KUMA_DB_PATH` 指向 Kuma 的 SQLite 文件，Docker 部署时用只读挂载。
 
 ```yaml
 # docker-compose.yml
@@ -254,28 +265,44 @@ services:
     build: .
     ports:
       - "8088:8000"
+    environment:
+      - KUMA_DB_PATH=/data/kuma.db       # Kuma 的 SQLite 文件路径
+      - DEVICES_PATH=/app/config/devices.yaml
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      - /path/to/your/kuma.db:/data/kuma.db:ro   # 改成你的 Kuma DB 路径
     network_mode: host   # 米家设备需要局域网访问
     restart: unless-stopped
 ```
 
-`network_mode: host` 是为了 python-miio 能直接发现和控制局域网设备。
+部署者需要：
+1. 找到自己的 Uptime Kuma 数据库文件（通常在 Kuma 容器的 `/app/data/kuma.db`）
+2. 只读挂载到 HomeDash 容器，设 `KUMA_DB_PATH` 指向挂载路径
+3. 从 `config/devices.yaml.example` 拷贝创建 `config/devices.yaml`，填入米家设备 token
 
-## 开发分工建议
+## 配置与环境变量
 
-| 任务 | 推荐工具 | 理由 |
-|------|---------|------|
-| 架构设计/需求细化 | Claude Code | 擅长架构 |
-| 后端 API 开发 | Codex CLI | 性价比高 |
-| 前端页面 | 手写或 Codex | 单页无需复杂工具 |
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `KUMA_DB_PATH` | `/data/kuma.db` | Uptime Kuma 的 SQLite 路径（容器内） |
+| `DEVICES_PATH` | `config/devices.yaml` | 米家设备配置路径 |
 
-## 待确认
+## 开发命令
 
-1. **米家设备型号和数量** — 需要 token 获取方式说明？
-2. **Uptime Kuma 是否已开公开状态页？** — 决定对接方式
-3. **日用品预测精度** — 线性回归够用？还是需要考虑季节性？
-4. **界面风格偏好** — 简洁暗色 / 简洁亮色 / 其他？
-5. **是否需要多用户？** — 还是纯家庭单用户即可？
-6. **通知方式** — 需要推送到 Telegram/QQ？还是只看面板？
+**必须从仓库根目录运行：**
+
+```bash
+pip install -r requirements.txt          # 装依赖
+uvicorn app.main:app --reload            # 开发服务器，http://127.0.0.1:8000
+```
+
+**验证方式 = 各模块的 `__main__` 自检：**
+
+```bash
+python -m app.modules.items     # 预测数学断言
+python -m app.modules.devices   # 命令映射表 + 配置加载
+python -m app.modules.uptime    # 无 DB 文件不报错
+```
+
+改了哪个模块就跑哪个；改了 `predict_item` 必跑 items 自检。无 lint/typecheck 配置，无 pytest。

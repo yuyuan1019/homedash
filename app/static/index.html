@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HomeDash</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>🏠 HomeDash</h1>
+    <button id="refresh-btn">🔄</button>
+  </header>
+  <nav class="tabs">
+    <button class="tab active" data-tab="devices">设备控制</button>
+    <button class="tab" data-tab="uptime">监控状态</button>
+    <button class="tab" data-tab="items">日用品</button>
+  </nav>
+  <main>
+    <section id="tab-devices" class="panel active"></section>
+    <section id="tab-uptime" class="panel"></section>
+    <section id="tab-items" class="panel"></section>
+  </main>
+  <div id="toast"></div>
+  <div id="modal" class="modal hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
