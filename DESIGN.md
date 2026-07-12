@@ -5,7 +5,7 @@
 一个轻量自托管 Web 应用，整合三个功能模块：
 1. **米家设备控制** - python-miio 局域网直控灯/空调/插座等
 2. **Uptime 监控** - 直读 Uptime Kuma 的 SQLite，展示心跳状态
-3. **日用品管理** - 记录消耗/购买，线性预测下次购买时间
+3. **日用品管理** - 记录消耗/购买，预测补货（现状：线性全历史平均；目标：EWMA + 安全库存，见 DEVPLAN 待办 0）
 
 ## 当前状态
 
@@ -13,20 +13,21 @@
 |------|------|------|
 | Phase 1 | 后端骨架 + 数据库 + items 模块 | ✅ 完成 |
 | Phase 2 | devices + uptime 模块 | ✅ 完成 |
-| Phase 3 | 前端页面 (style.css + app.js) | ⬜ 待开发 |
-| Phase 4 | Docker 部署 | ⬜ 待定 |
+| Phase 3 | 前端页面 (style.css + app.js) | ✅ 完成（米家风格设备页） |
+| Phase 4 | Docker 部署 | ✅ 完成 |
+| 增强 | 日用品预测升级 EWMA | ⬜ 待开发（规格在 DEVPLAN） |
 
-后端三模块 API 已全部可用。前端只有 `app/static/index.html` 骨架，引用的 `/style.css` 和 `/app.js` 尚未创建。StaticFiles 挂载在 `/`，前端缺失时 API 仍可正常访问。
+> 细节与待办以 `DEVPLAN.md` / `AGENTS.md` / 代码为准；本文「预测算法」分现状与目标两段，避免和旧描述混淆。
 
 ## 技术选型
 
 | 层 | 选择 | 理由 |
 |----|------|------|
 | 后端 | FastAPI + aiosqlite | 轻量、无 ORM、全裸 SQL |
-| 米家控制 | `python-miio` | 局域网直控，不走云，无需 HA |
+| 米家控制 | `python-miio` + `micloud` | WiFi 局域网直控；BLE Mesh 走云端 MIOT |
 | Uptime 对接 | 直读 Kuma SQLite（只读 uri） | 避开 Socket.IO 复杂性，无锁竞争 |
 | 前端 | 单页 HTML + vanilla JS | 无构建步骤，无框架，中文 UI |
-| 部署 | 待定（Docker 或裸跑） | DESIGN 中有示例但尚未实现 |
+| 部署 | Docker Compose | `Dockerfile` + 环境变量挂载 Kuma 数据目录 |
 
 ## 架构
 
@@ -167,16 +168,27 @@ CREATE TABLE IF NOT EXISTS purchase_logs (
 
 **预测算法（纯函数 `predict_item`）：**
 
+**A. 现状（已实现）——全历史均匀线性：**
+
 ```
 1. 取该物品全部用量记录
-2. 计算日均消耗率 = 总消耗量 / 跨度天数（单条记录跨度按 1 天兜底）
-3. 预计耗尽日期 = 当前日期 + 当前库存 / 日均消耗率
-4. 若预计耗尽天数 < 7天 -> 标记"需要购买"
-5. 建议购买数量 = ceil(日均消耗率 × 30 - 当前库存)，仅需要购买时非零
-6. 无用量记录时返回空预测（daily_rate=0），不报错
+2. 日均消耗率 = 总消耗量 / 首末日跨度（单条或同日 → 跨度按 1 天兜底）
+3. 预计耗尽天数 = 当前库存 / 日均消耗率
+4. 若 < BUY_THRESHOLD(7) → need_buy
+5. 建议购买量 = ceil(日均 × TARGET_DAYS(30) - 库存)，仅 need_buy 时非零
+6. 无用量记录 → daily_rate=0，基本不预测
 ```
 
-**常量：** `BUY_THRESHOLD=7`（天）、`TARGET_DAYS=30`（建议购买覆盖周期）
+**B. 目标（未实现，规格见 DEVPLAN 待办 0）——两口·120㎡ 家庭推荐：**
+
+- 主模型：**EWMA 日消耗率**（α≈0.35，近记录权重大）
+- 安全库存：`max(min_stock, rate × LEAD_DAYS)`，LEAD_DAYS 默认 3
+- 冷启动：品类先验；懒记用量时可用购买间隔中位数兜底
+- 适用品类：纸品（卫生纸/湿巾）、洗护（洗发露/肥皂/牙膏等）、宠物（猫砂/猫粮）、冷冻主食（方便面/水饺/汤圆）等——**同一套模型**，差别在 unit 与登记节奏
+- **不做** ARIMA / Prophet / LSTM；不按房屋面积进公式
+
+**常量（现状已用）：** `BUY_THRESHOLD=7`、`TARGET_DAYS=30`  
+**目标新增常量：** `EWMA_ALPHA=0.35`、`LEAD_DAYS=3`
 
 **库存方向：** `/usage` 减库存，`/purchase` 加库存。
 

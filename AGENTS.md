@@ -31,7 +31,9 @@ python -m app.modules.uptime    # 无 DB 文件不报错
 
 - **数据库连接是模块级单例**：`app/database.py` 的 `_db` 全局共享，`get_db()` 返回同一连接。不要改成 per-request。
 - **items 模块库存方向**：`/usage` 端点**减**库存，`/purchase` 端点**加**库存。改方向就是 bug。
-- **预测是纯函数** `predict_item(logs, current_stock, today)`，可脱离 DB 测试。常量 `BUY_THRESHOLD=7`（天）、`TARGET_DAYS=30`（建议购买覆盖周期）。无用量记录时返回空预测，不报错。
+- **预测是纯函数** `predict_item(logs, current_stock, today)`，可脱离 DB 测试。
+  - **现状（代码）**：全历史均匀平均；`BUY_THRESHOLD=7`、`TARGET_DAYS=30`；无用量时几乎不预测。
+  - **目标（未实现）**：EWMA + 安全库存 + 品类先验/购买间隔兜底；规格在 `DEVPLAN.md` 待办 0。改预测前先读该节，勿直接当已上线行为。
 - **devices 模块**：`_POWER_CMDS` 按 `type` 查开关命令，新设备类型加一行即可；`_DEFAULT` 兜底 `set_power`。`Device` 实例缓存在 cfg dict 的 `_inst` 字段（下划线前缀字段在 `/devices` 列表里被过滤掉，别返回给前端）。
 - **BLE Mesh 云端控制**：有 `did` 无 `host` 的设备走云端 MIOT API（`_cloud_miot_set`），凭据从 `data/xiaomi_cloud.json` 读取（`_get_cloud` 单例）。`_send_power` 统一分发：WiFi 走局域网，BLE Mesh 走云端。`_MIOT_PROPS` 按 type 查 siid/piid，config 里可覆盖 siid（双键开关左=2 右=3）。
 - **devices 启动会双重加载**：`main.py` lifespan 和 `devices.py` 的 `on_event("startup")` 都调 `load_devices()`，无害，别删其中一个以为在去重。
@@ -51,9 +53,10 @@ python -m app.modules.uptime    # 无 DB 文件不报错
 DESIGN.md 是初版设计，**与代码有出入，以代码为准**：
 
 - 后端 Phase 1+2+3 已完成（items/devices/uptime 三模块 API 全通，BLE Mesh 云端控制已加）。
-- 前端 Phase 3 已完成：`app/static/style.css`（暗色主题）+ `app/static/app.js`（三 Tab 全功能）。设备 Tab 支持 BLE Mesh 云端控制。
+- 前端 Phase 3 已完成：米家风格浅色 UI + 三 Tab；设备双列卡片与开关。
 - Docker 部署已可用：`Dockerfile` + `docker-compose.yml`，Kuma 数据目录用 `.env` 的 `KUMA_DATA_DIR` 配置。
 - 设备状态接口已可用：`GET /api/devices/status` 返回每台设备 online/power（best-effort）。
+- 日用品预测升级（EWMA 等）**仅有规格、未开发**，见 DEVPLAN 待办 0。用户可先登记纸品/洗护/猫用品/冷冻食品等，模型升级后自动受益。
 - `requirements.txt` 里**没有 jinja2**（DESIGN 列了但实际没装）。
 
 ## 代码风格约定
