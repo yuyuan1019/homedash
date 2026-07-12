@@ -253,6 +253,250 @@ Content-Type: application/json
 **状态**：先不做。当前手写 `config/devices.yaml` 足够。  
 真实设备多到维护 YAML 明显痛苦时再做 `POST /api/devices/import`。
 
+---
+
+## 待办 6：周报邮件提醒（库存/需购买）— **规格，尚未开发**
+
+**难度**：★☆☆☆☆ 简单  
+**目标**：每周自动发一封中文邮件，汇总家里剩余与「需要购买」清单。  
+**场景**：两口之家，不想天天打开面板，周末采购前看一眼邮件即可。
+
+### 6.1 产品行为
+
+- **默认频率**：每周一次（建议周日 18:00 或周六 10:00，时区 `Asia/Shanghai`）
+- **触发方式**（实现时二选一，优先 A）：
+  - **A. 容器内 APScheduler / 后台 asyncio 定时**（自包含，不依赖宿主机 cron）
+  - **B. 暴露 `POST /api/notify/weekly` + 宿主机 cron 调**（更透明、更好测）
+- **静默策略**：若「需购买」为空且开启 `NOTIFY_ONLY_WHEN_NEED_BUY=true`，可跳过发送（可选）
+- **手动试发**：`POST /api/notify/test` 立即发一封测试邮件
+
+### 6.2 邮件内容（中文纯文本 + 简单 HTML 二选一，先纯文本）
+
+```
+主题：HomeDash 周报 · 需购买 N 项 · YYYY-MM-DD
+
+【需要购买】
+- 卫生纸：剩余 2 卷，预计 5 天，建议买 10 卷
+- 猫砂：剩余 0.5 袋，预计 3 天，建议买 2 袋
+
+【库存一览】（可选，或仅列不足 14 天的）
+- 方便面：12 包，预计 40 天
+...
+
+打开面板：http://<你的主机>:<端口>/
+```
+
+数据来源：复用现有 `GET /api/items` / `predict_item` 结果，**不重写预测**。
+
+### 6.3 配置（`.env` / `.env.example`，勿写真实密码进仓库）
+
+| 变量 | 示例 | 说明 |
+|------|------|------|
+| `SMTP_HOST` | `smtp.qq.com` | SMTP 服务器 |
+| `SMTP_PORT` | `465` 或 `587` | SSL/STARTTLS |
+| `SMTP_USER` | 发件邮箱 | |
+| `SMTP_PASSWORD` | 授权码 | **授权码不是登录密码**（QQ/163 等） |
+| `SMTP_FROM` | 同 USER 或别名 | 发件人显示 |
+| `NOTIFY_TO` | `a@x.com,b@y.com` | 收件人，逗号分隔（夫妻两人） |
+| `NOTIFY_CRON` | `0 18 * * 0` | 每周日 18:00 |
+| `NOTIFY_TZ` | `Asia/Shanghai` | |
+| `NOTIFY_ENABLED` | `true` | 总开关 |
+| `NOTIFY_ONLY_WHEN_NEED_BUY` | `false` | 仅有需购买时才发 |
+
+实现用 **stdlib `smtplib` + `email`**，尽量不新增依赖。若用 APScheduler 再加一个轻依赖，或走方案 B 零依赖。
+
+### 6.4 API（建议）
+
+```
+POST /api/notify/test     → 立即按当前库存发测试邮件 {ok, to, subject}
+POST /api/notify/weekly   → 与定时任务同一套逻辑（供 cron 调）
+GET  /api/notify/config   → 返回是否已配置（脱敏：只返回 enabled / has_smtp / to_count，不回密码）
+```
+
+### 6.5 实现文件（预估）
+
+- 新建 `app/modules/notify.py`（组信 + SMTP 发送 + 可选路由）
+- `app/main.py` 挂载路由；若方案 A，在 lifespan 里启动调度
+- `.env.example`、README 增加「邮件提醒」配置说明
+- 自检：无 SMTP 配置时不崩溃；`python -m app.modules.notify` 可 dry-run 打印正文
+
+### 6.6 明确不做（本期）
+
+- 不做推送 App / 企业微信 / Telegram（可后续加通道抽象）
+- 不做每日本地弹窗
+- 不在邮件里放 token 或内网设备控制链接以外的敏感信息
+
+---
+
+## 待办 7：语音记账入库（语音 → 文本 → 库存变更）— **规格，尚未开发**
+
+**难度**：★★★☆☆ 中等（识别环境 + 中文意图解析）  
+**目标**：日用品页有一个「按住说话」按钮；例如「加 10 包方便面」→ 有则加库存并记购买，无则新建条目再入库。  
+**结论**：**好做，建议分两阶段**；不必一上来接大模型。
+
+### 7.1 用户体验
+
+1. 打开「日用品」Tab → 点/按住 **🎤 语音记账**
+2. 说话，例如：
+   - `加 10 包方便面` / `方便面加十包` / `+10 方便面`
+   - `用掉 2 卷卫生纸` / `卫生纸少了两卷`
+   - `猫粮买了 1 袋`
+3. 前端展示识别出的文字 + 解析结果预览（物品、数量、动作）
+4. **默认二次确认**（「确认写入」）；可后续加「熟练模式」跳过确认
+5. 成功 toast：`方便面 +10 包（购买），库存 12`
+
+### 7.2 推荐架构（家庭自托管）
+
+```
+浏览器麦克风
+    │  MediaRecorder (webm/ogg)
+    ▼
+POST /api/items/voice   (multipart: audio 文件)
+    │
+    ├─ 1) STT 语音转文字
+    │     路径 A（推荐先做）：浏览器 Web Speech API（Chrome 中文）→ 前端直接拿 text
+    │     路径 B：后端 Whisper（本地 faster-whisper 或 OpenAI-compatible STT）
+    │
+    ├─ 2) 解析 text → 结构化指令
+    │     优先：规则 + 轻量正则 / 简单槽位（中文数量词）
+    │     可选增强：本地小模型 / 云端 LLM 做纠错（非必须）
+    │
+    └─ 3) 执行库存动作（复用现有 purchase / usage / create item）
+```
+
+**为什么先做路径 A（浏览器识别）？**
+
+| | 浏览器 Web Speech | 后端 Whisper |
+|--|------------------|--------------|
+| 依赖 | 几乎无（HTTPS 或 localhost） | 模型体积大或需 API Key |
+| 中文 | Chrome 可用，Safari/部分环境差 | 一般更稳 |
+| Docker/局域网 HTTP | 非 HTTPS 时浏览器可能禁用麦克风 | 不受此限（前端仍要麦克风权限） |
+| 实现量 | 小 | 中～大 |
+
+**落地建议：**
+
+1. **Phase 7a**：前端 Web Speech → 文本框可编辑 → `POST /api/items/parse_and_apply` 只收文本  
+2. **Phase 7b**（可选）：后端 STT，上传音频，解决非 Chrome / 纯 HTTP 场景  
+
+你举例的「+10 包方便面」在 7a 就能闭环。
+
+### 7.3 意图与解析规则（先规则，不上大模型）
+
+**动作 action：**
+
+| 说法 | action | 库存方向 |
+|------|--------|----------|
+| 加 / 增加 / 买了 / 购入 / + | `purchase` | 加库存 + 写 purchase_logs |
+| 用掉 / 吃了 / 消耗 / 少了 / - | `usage` | 减库存 + 写 usage_logs |
+| 仅名词+数量且无动词 | 默认 `purchase`（入库更常见） | |
+
+**数量 amount：**
+
+- 阿拉伯数字：`10`、`0.5`、`2.5`
+- 中文数字：`十` `两` `三` `半` → 10 / 2 / 3 / 0.5
+- 与单位粘连：`10包` `两卷` `一袋`
+
+**单位 unit（可选，新建条目时用）：**
+
+`包|袋|卷|瓶|支|盒|桶|kg|g|升|L|个|提`
+
+**物品名 name：**
+
+- 去掉动作词、数量、单位后的剩余中文，如 `方便面`
+- 与已有 items **模糊匹配**：完全相等 > 包含 > 编辑距离（简单即可）
+- 匹配到唯一项 → 用已有 id；匹配到多个 → 返回候选让用户选；匹配不到 → **自动创建**（你提的需求）
+
+**新建条目默认：**
+
+```json
+{
+  "name": "方便面",
+  "category": "冷冻",   // 可先 "其他"，或简单关键词表猜：面/饺/汤圆→冷冻，猫→宠物
+  "unit": "包",         // 从话术提取，默认「个」
+  "current_stock": 0,
+  "min_stock": 1
+}
+```
+
+然后立刻对该 id 做 `purchase(amount=10)`。
+
+### 7.4 API 设计
+
+```http
+# 只解析不写库（预览）
+POST /api/items/voice/parse
+{"text": "加 10 包方便面"}
+
+→ {
+  "ok": true,
+  "action": "purchase",
+  "name": "方便面",
+  "amount": 10,
+  "unit": "包",
+  "matched_item_id": 3,      // 或 null
+  "will_create": false,
+  "confidence": "high",
+  "display": "方便面 +10 包（购买）"
+}
+
+# 解析并执行（确认后）
+POST /api/items/voice/apply
+{"text": "加 10 包方便面"}   // 或直接传 parse 结果结构
+→ {"ok": true, "item_id": 3, "current_stock": 12, "created": false}
+
+# 可选：音频 STT（Phase 7b）
+POST /api/items/voice/transcribe
+Content-Type: multipart/form-data; audio=@blob
+→ {"text": "加十包方便面"}
+```
+
+### 7.5 前端
+
+- 日用品 Tab 工具栏增加 `🎤 语音记账`
+- 支持：按住说话 / 点按开始-结束
+- 识别中显示波形或「正在听…」
+- 结果进入底部 sheet：可改文字后「确认写入」
+- 无麦克风权限、非安全上下文：降级为「手动输入一句话」文本框（同一套 parse/apply）
+
+### 7.6 安全与坑
+
+- 仅家庭内网，不做账号体系；语音接口同样无鉴权（与现有 API 一致）
+- 误识别风险：必须有确认步或可撤销（可选：apply 后 10 秒内 undo 上一条）
+- Docker 下浏览器访问 `http://IP` 时，**部分浏览器禁止麦克风** → 文档写明：用 Chrome + localhost 反代 HTTPS，或改用「打字一句话」降级
+- 不把音频默认落盘；若调试需要，写 `data/voice_debug/` 且 gitignore
+
+### 7.7 实现文件（预估）
+
+- `app/modules/items_voice.py` 或 `items.py` 内新路由：parse / apply
+- `app/static/app.js`：麦克风 + UI
+- `app/static/style.css`：按钮与 sheet
+- 可选 `faster-whisper` 或 OpenAI-compatible HTTP STT（仅 7b，写进可选依赖，不塞进默认 requirements）
+- 自检：纯文本用例  
+  - `加10包方便面` → purchase 10 方便面  
+  - `用掉两卷卫生纸` → usage 2  
+  - 无条目时 will_create true  
+
+### 7.8 与「打模型」的关系
+
+你说的「语音打模型转文字」可以拆成：
+
+| 步骤 | 要不要模型 |
+|------|------------|
+| 语音 → 文字 | STT（浏览器或 Whisper），不是聊天模型 |
+| 文字 → 加库存指令 | **规则解析通常够**；只有口语很乱时才上 LLM |
+| 写库存 | 现有 API，不需要模型 |
+
+**推荐默认：STT + 规则解析**，成本低、可离线、可测。  
+若以后口语复杂（「把昨天吃的那袋猫粮补上」），再加可选 LLM 解析开关 `VOICE_LLM_URL`。
+
+### 7.9 明确不做（本期）
+
+- 不做连续对话式多轮管家
+- 不做声纹识别 / 区分夫妻账号
+- 不做离线端侧大模型包进默认镜像（镜像会暴涨）
+
+---
+
 ## 待办 5：README / AGENTS 状态同步
 
 每次完成上面任一待办，同步更新：
@@ -262,3 +506,14 @@ Content-Type: application/json
 - 本文件对应待办状态
 
 不要把本地真实路径、token、账号、`config/devices.yaml` 写进公开文档。
+
+## 待办优先级（建议）
+
+| 顺序 | 待办 | 原因 |
+|------|------|------|
+| 1 | 0 预测 EWMA | 你先大批量登记后收益最大 |
+| 2 | 6 周报邮件 | 简单、立刻减轻开面板负担 |
+| 3 | 7a 语音（Web Speech + 文本解析） | 体验提升大，可先不做后端 Whisper |
+| 4 | 1 Docker 验收 / 2 灯光 props | 按需 |
+| 5 | 7b 后端 STT | 环境需要时再做 |
+| 推迟 | 4 粘贴导入 | 仍推迟 |
