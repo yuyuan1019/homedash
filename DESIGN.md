@@ -29,34 +29,31 @@
 | 层 | 选择 | 理由 |
 |----|------|------|
 | 后端 | FastAPI + aiosqlite | 轻量、无 ORM、全裸 SQL |
-| 米家控制 | `python-miio` + `micloud` | WiFi 局域网直控；BLE Mesh 走云端 MIOT |
-| Uptime 对接 | 直读 Kuma SQLite（只读 uri） | 避开 Socket.IO 复杂性，无锁竞争 |
-| 前端 | 单页 HTML + vanilla JS | 无构建步骤，无框架，中文 UI |
-| 部署 | Docker Compose | `Dockerfile` + 环境变量挂载 Kuma 数据目录 |
+| 米家控制 | `python-miio` + `micloud` | WiFi 局域网；BLE Mesh 云端 MIOT |
+| Uptime | 直读 Kuma SQLite（只读 uri） | 避开 Socket.IO |
+| 前端 | HTML + vanilla JS | 无构建、中文、米家浅色 |
+| 部署 | Docker Compose | env 挂载 Kuma 数据目录 |
+| 邮件（规划） | stdlib smtplib + Gmail | 周报，无 Gmail API OAuth |
+| AI（规划） | httpx → OpenAI-compatible | 白名单 actions 写库，禁止裸 SQL |
+| IM 提醒（规划） | 外部 home agent | HomeDash 只提供 `/api/agent/todos/*` |
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────┐
-│                  浏览器                      │
-│  ┌──────────┬──────────┬──────────────────┐ │
-│  │ 设备控制  │ Uptime   │ 日用品管理       │ │
-│  └────┬─────┴────┬─────┴────┬─────────────┘ │
-└───────┼──────────┼──────────┼────────────────┘
-        │          │          │
-┌───────┼──────────┼──────────┼────────────────┐
-│       ▼          ▼          ▼   FastAPI       │
-│  ┌─────────┐ ┌────────┐ ┌──────────────────┐ │
-│  │miio 控制 │ │Kuma DB │ │ 日用品 CRUD+预测  │ │
-│  └────┬────┘ └───┬────┘ └────────┬─────────┘ │
-│       │          │               │            │
-│       ▼          ▼               ▼            │
-│   米家设备    Uptime Kuma     SQLite          │
-│  (局域网)     (SQLite 只读)  (homedash.db)    │
-└───────────────────────────────────────────────┘
+浏览器：设备 | 监控 | 日用品 |〔待办〕|〔AI 工作台〕
+              │
+         FastAPI /api/*
+    ┌─────────┼──────────┬─────────────┐
+    ▼         ▼          ▼             ▼
+  devices   uptime     items      〔todos/notify/ai〕
+  miio/云   Kuma ro    SQLite      规划模块
 ```
 
+外部：Gmail SMTP（周报）· LLM API（AI parse）· home agent（QQ/微信投递）
+
 ## 依赖清单
+
+**当前 requirements.txt：**
 
 ```
 fastapi
@@ -65,11 +62,24 @@ python-miio
 pyyaml
 httpx
 aiosqlite
+python-dotenv
+micloud
 ```
 
-共 6 个依赖。没有前端框架，没有 ORM，没有 Redis，没有 jinja2。
+无前端框架、无 ORM、无 Redis、无 jinja2。规划功能优先 stdlib / 已有 httpx，不默认塞进大模型运行时。
 
 ## 模块设计
+
+### 0. 模块地图
+
+| 模块 | 状态 | 文件 |
+|------|------|------|
+| 米家设备 | ✅ | `app/modules/devices.py` |
+| Uptime | ✅ | `app/modules/uptime.py` |
+| 日用品 | ✅ | `app/modules/items.py` |
+| 重点待办 | ⬜ | `app/modules/todos.py`（DEVPLAN 8） |
+| Gmail 通知 | ⬜ | `app/modules/notify.py`（DEVPLAN 6） |
+| AI 工作台 | ⬜ | `ai_workbench.py` + `ai_executor.py`（DEVPLAN 7） |
 
 ### 1. 米家设备控制
 
@@ -252,74 +262,69 @@ GET    /api/items/predictions        - 全部预测汇总 {need_buy, sufficient}
 
 ```
 homedash/
+├── README.md / DEVPLAN.md / DESIGN.md / AGENTS.md
 ├── requirements.txt
+├── Dockerfile / docker-compose.yml / .env.example
 ├── config/
-│   ├── devices.yaml.example   # 米家设备配置模板
-│   └── devices.yaml           # 真实配置（含 token，勿提交）
+│   ├── devices.yaml.example
+│   └── devices.yaml              # 勿提交
 ├── app/
-│   ├── main.py                # FastAPI 入口
-│   ├── database.py            # SQLite 连接 + 表初始化
+│   ├── main.py
+│   ├── database.py
+│   ├── xiaomi_login.py / discover_devices.py
 │   ├── modules/
-│   │   ├── devices.py         # 米家设备控制
-│   │   ├── uptime.py          # Uptime Kuma 对接
-│   │   └── items.py           # 日用品 CRUD + 预测
+│   │   ├── devices.py            # ✅
+│   │   ├── uptime.py             # ✅
+│   │   ├── items.py              # ✅
+│   │   ├── todos.py              # ⬜ 规划
+│   │   ├── notify.py             # ⬜ 规划
+│   │   ├── ai_workbench.py       # ⬜ 规划
+│   │   └── ai_executor.py        # ⬜ 规划
 │   └── static/
-│       ├── index.html         # 单页前端骨架（已有）
-│       ├── style.css          # ⬜ 待创建
-│       └── app.js             # ⬜ 待创建
-└── data/
-    └── homedash.db            # SQLite 数据库（首次运行自动建表）
+│       ├── index.html
+│       ├── style.css             # ✅ 米家浅色
+│       └── app.js                # ✅ 三 Tab；规划扩待办/AI
+└── data/                         # 运行时
 ```
 
-## 部署方式（待实现）
+## 部署方式（已实现）
 
-通过环境变量配置，不硬编码路径。`KUMA_DB_PATH` 指向 Kuma 的 SQLite 文件，Docker 部署时用只读挂载。
+见仓库根目录 `docker-compose.yml` 与 `README.md` Docker 章节。要点：
 
-```yaml
-# docker-compose.yml
-services:
-  homedash:
-    build: .
-    ports:
-      - "8088:8000"
-    environment:
-      - KUMA_DB_PATH=/data/kuma.db       # Kuma 的 SQLite 文件路径
-      - DEVICES_PATH=/app/config/devices.yaml
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-      - /path/to/your/kuma.db:/data/kuma.db:ro   # 改成你的 Kuma DB 路径
-    network_mode: host   # 米家设备需要局域网访问
-    restart: unless-stopped
-```
-
-部署者需要：
-1. 找到自己的 Uptime Kuma 数据库文件（通常在 Kuma 容器的 `/app/data/kuma.db`）
-2. 只读挂载到 HomeDash 容器，设 `KUMA_DB_PATH` 指向挂载路径
-3. 从 `config/devices.yaml.example` 拷贝创建 `config/devices.yaml`，填入米家设备 token
+- 端口：`${HOMEDASH_PORT:-8088}:8000`
+- Kuma：挂载**数据目录** `KUMA_DATA_DIR` → 容器 `/kuma-data`，`KUMA_DB_PATH=/kuma-data/kuma.db`
+- 默认 bridge 网络；按 IP 控米家即可
+- 不写死本机绝对路径；用 `.env` + `.env.example`
 
 ## 配置与环境变量
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `KUMA_DB_PATH` | `/data/kuma.db` | Uptime Kuma 的 SQLite 路径（容器内） |
-| `DEVICES_PATH` | `config/devices.yaml` | 米家设备配置路径 |
+| 变量 | 说明 |
+|------|------|
+| `KUMA_DB_PATH` / `KUMA_DATA_DIR` | Kuma 库路径 / 宿主机目录 |
+| `DEVICES_PATH` | 设备 YAML |
+| `HOMEDASH_PORT` | 对外端口 |
+| `XIAOMI_*` | 可选，首次云端登录 |
+| `SMTP_*` / `NOTIFY_*` | ⬜ Gmail 周报（规划） |
+| `LLM_*` / `AI_*` | ⬜ AI 工作台（规划） |
+| `AGENT_API_TOKEN` | ⬜ home agent（规划） |
+
+完整注释模板见 `.env.example`。
 
 ## 开发命令
 
 **必须从仓库根目录运行：**
 
 ```bash
-pip install -r requirements.txt          # 装依赖
-uvicorn app.main:app --reload            # 开发服务器，http://127.0.0.1:8000
+pip install -r requirements.txt
+uvicorn app.main:app --reload
 ```
 
-**验证方式 = 各模块的 `__main__` 自检：**
+**自检：**
 
 ```bash
-python -m app.modules.items     # 预测数学断言
-python -m app.modules.devices   # 命令映射表 + 配置加载
-python -m app.modules.uptime    # 无 DB 文件不报错
+python -m app.modules.items
+python -m app.modules.devices
+python -m app.modules.uptime
 ```
 
-改了哪个模块就跑哪个；改了 `predict_item` 必跑 items 自检。无 lint/typecheck 配置，无 pytest。
+改了哪个模块跑哪个；改 `predict_item` 必跑 items。无 lint/typecheck，无 pytest。公开文档以 **README.md** 为入口，待办规格以 **DEVPLAN.md** 为准。
