@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+python-miio
+pyyaml
+httpx
+aiosqlite
