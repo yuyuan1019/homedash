@@ -16,8 +16,8 @@
 | Phase 3 | 前端页面 (style.css + app.js) | ✅ 完成（米家风格设备页） |
 | Phase 4 | Docker 部署 | ✅ 完成 |
 | 增强 | 日用品预测升级 EWMA | ⬜ 待开发（规格在 DEVPLAN 待办 0） |
-| 增强 | 周报邮件提醒 | ⬜ 待开发（规格在 DEVPLAN 待办 6） |
-| 增强 | 语音记账入库 | ⬜ 待开发（规格在 DEVPLAN 待办 7） |
+| 增强 | 周报邮件提醒 | ⬜ 待开发（Gmail SMTP，DEVPLAN 待办 6） |
+| 增强 | 语音记账入库 | ⬜ 待开发（STT + LLM 解析，DEVPLAN 待办 7） |
 
 > 细节与待办以 `DEVPLAN.md` / `AGENTS.md` / 代码为准；本文「预测算法」分现状与目标两段，避免和旧描述混淆。
 

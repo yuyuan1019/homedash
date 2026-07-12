@@ -259,18 +259,19 @@ Content-Type: application/json
 
 **难度**：★☆☆☆☆ 简单  
 **目标**：每周自动发一封中文邮件，汇总家里剩余与「需要购买」清单。  
-**场景**：两口之家，不想天天打开面板，周末采购前看一眼邮件即可。
+**场景**：两口之家，不想天天打开面板，周末采购前看一眼邮件即可。  
+**邮件通道（已定）**：**Gmail SMTP**（应用专用密码 App Password，不是谷歌登录密码）。
 
 ### 6.1 产品行为
 
 - **默认频率**：每周一次（建议周日 18:00 或周六 10:00，时区 `Asia/Shanghai`）
-- **触发方式**（实现时二选一，优先 A）：
-  - **A. 容器内 APScheduler / 后台 asyncio 定时**（自包含，不依赖宿主机 cron）
-  - **B. 暴露 `POST /api/notify/weekly` + 宿主机 cron 调**（更透明、更好测）
+- **触发方式**（实现时二选一，优先 B 更易测；A 更省事）：
+  - **A. 容器内 APScheduler / 后台 asyncio 定时**（自包含）
+  - **B. 暴露 `POST /api/notify/weekly` + 宿主机 cron / Hermes cron 调**
 - **静默策略**：若「需购买」为空且开启 `NOTIFY_ONLY_WHEN_NEED_BUY=true`，可跳过发送（可选）
-- **手动试发**：`POST /api/notify/test` 立即发一封测试邮件
+- **手动试发**：`POST /api/notify/test` 立即发一封测试邮件到 `NOTIFY_TO`
 
-### 6.2 邮件内容（中文纯文本 + 简单 HTML 二选一，先纯文本）
+### 6.2 邮件内容（先纯文本）
 
 ```
 主题：HomeDash 周报 · 需购买 N 项 · YYYY-MM-DD
@@ -286,214 +287,234 @@ Content-Type: application/json
 打开面板：http://<你的主机>:<端口>/
 ```
 
-数据来源：复用现有 `GET /api/items` / `predict_item` 结果，**不重写预测**。
+数据来源：复用现有 items + `predict_item`，**不重写预测**。
 
-### 6.3 配置（`.env` / `.env.example`，勿写真实密码进仓库）
+### 6.3 Gmail 配置（`.env` / `.env.example`）
 
-| 变量 | 示例 | 说明 |
-|------|------|------|
-| `SMTP_HOST` | `smtp.qq.com` | SMTP 服务器 |
-| `SMTP_PORT` | `465` 或 `587` | SSL/STARTTLS |
-| `SMTP_USER` | 发件邮箱 | |
-| `SMTP_PASSWORD` | 授权码 | **授权码不是登录密码**（QQ/163 等） |
-| `SMTP_FROM` | 同 USER 或别名 | 发件人显示 |
-| `NOTIFY_TO` | `a@x.com,b@y.com` | 收件人，逗号分隔（夫妻两人） |
+> 实现前用户需在 Google 账号开启两步验证，并生成 **应用专用密码**（App Password）。  
+> **禁止**把真实密码写进仓库；文档只写占位符。
+
+| 变量 | Gmail 推荐值 | 说明 |
+|------|--------------|------|
+| `SMTP_HOST` | `smtp.gmail.com` | 固定 |
+| `SMTP_PORT` | `587` | STARTTLS（推荐）；或 `465` SSL |
+| `SMTP_USER` | `you@gmail.com` | 完整 Gmail 地址 |
+| `SMTP_PASSWORD` | `xxxx xxxx xxxx xxxx` | **16 位应用专用密码**，不是登录密码 |
+| `SMTP_FROM` | 同 USER 或 `HomeDash <you@gmail.com>` | 发件显示名 |
+| `NOTIFY_TO` | `you@gmail.com,spouse@gmail.com` | 收件人，逗号分隔 |
 | `NOTIFY_CRON` | `0 18 * * 0` | 每周日 18:00 |
 | `NOTIFY_TZ` | `Asia/Shanghai` | |
 | `NOTIFY_ENABLED` | `true` | 总开关 |
 | `NOTIFY_ONLY_WHEN_NEED_BUY` | `false` | 仅有需购买时才发 |
+| `HOMEDASH_PUBLIC_URL` | `http://192.168.x.x:8088` | 邮件正文里的面板链接（可选） |
 
-实现用 **stdlib `smtplib` + `email`**，尽量不新增依赖。若用 APScheduler 再加一个轻依赖，或走方案 B 零依赖。
+实现：stdlib `smtplib` + `email`。Gmail 注意：
+
+- 必须用 App Password；普通密码会 auth 失败
+- 国内网络访问 `smtp.gmail.com` 若不通，需本机已有代理/出网环境（部署时实测；失败要在日志里写清）
+- 单日发送量家庭周报完全够用，无需 Gmail API OAuth（SMTP 足够）
+
+`.env.example` 片段（实现时写入）：
+
+```env
+# --- 邮件周报（Gmail）---
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com
+SMTP_PASSWORD=your-app-password
+SMTP_FROM=HomeDash <you@gmail.com>
+NOTIFY_TO=you@gmail.com
+NOTIFY_ENABLED=false
+NOTIFY_CRON=0 18 * * 0
+NOTIFY_TZ=Asia/Shanghai
+NOTIFY_ONLY_WHEN_NEED_BUY=false
+HOMEDASH_PUBLIC_URL=http://127.0.0.1:8088
+```
 
 ### 6.4 API（建议）
 
 ```
-POST /api/notify/test     → 立即按当前库存发测试邮件 {ok, to, subject}
-POST /api/notify/weekly   → 与定时任务同一套逻辑（供 cron 调）
-GET  /api/notify/config   → 返回是否已配置（脱敏：只返回 enabled / has_smtp / to_count，不回密码）
+POST /api/notify/test     → 立即发测试邮件 {ok, to, subject}
+POST /api/notify/weekly   → 与定时任务同一套逻辑
+GET  /api/notify/config   → 脱敏：enabled / has_smtp / to_count / host（不回密码）
 ```
 
 ### 6.5 实现文件（预估）
 
-- 新建 `app/modules/notify.py`（组信 + SMTP 发送 + 可选路由）
-- `app/main.py` 挂载路由；若方案 A，在 lifespan 里启动调度
-- `.env.example`、README 增加「邮件提醒」配置说明
-- 自检：无 SMTP 配置时不崩溃；`python -m app.modules.notify` 可 dry-run 打印正文
+- 新建 `app/modules/notify.py`
+- `app/main.py` 挂载路由；（可选）lifespan 调度
+- `.env.example`、README「Gmail 周报」小节
+- 自检：未配置时不崩溃；dry-run 打印正文
 
 ### 6.6 明确不做（本期）
 
-- 不做推送 App / 企业微信 / Telegram（可后续加通道抽象）
-- 不做每日本地弹窗
-- 不在邮件里放 token 或内网设备控制链接以外的敏感信息
+- 不做 QQ/163 多厂商向导（SMTP 字段通用，但文档与默认示例只写 Gmail）
+- 不做 Gmail OAuth / Gmail API
+- 不做推送 App / 企业微信（可后续加通道）
 
 ---
 
-## 待办 7：语音记账入库（语音 → 文本 → 库存变更）— **规格，尚未开发**
+## 待办 7：语音 / 自然语言记账（STT + **LLM 解析** → 库存变更）— **规格，尚未开发**
 
-**难度**：★★★☆☆ 中等（识别环境 + 中文意图解析）  
-**目标**：日用品页有一个「按住说话」按钮；例如「加 10 包方便面」→ 有则加库存并记购买，无则新建条目再入库。  
-**结论**：**好做，建议分两阶段**；不必一上来接大模型。
+**难度**：★★★☆☆  
+**目标**：日用品页「🎤 语音记账」；说话或打字后，由 **LLM** 理解意图并生成结构化操作，用于**新增 / 修改库存**（购买、消耗、必要时新建条目）。  
+**已定方案**：**LLM 负责意图与槽位解析**（不是可有可无）；STT 仍可先用浏览器或后端。
 
 ### 7.1 用户体验
 
-1. 打开「日用品」Tab → 点/按住 **🎤 语音记账**
-2. 说话，例如：
-   - `加 10 包方便面` / `方便面加十包` / `+10 方便面`
-   - `用掉 2 卷卫生纸` / `卫生纸少了两卷`
-   - `猫粮买了 1 袋`
-3. 前端展示识别出的文字 + 解析结果预览（物品、数量、动作）
-4. **默认二次确认**（「确认写入」）；可后续加「熟练模式」跳过确认
-5. 成功 toast：`方便面 +10 包（购买），库存 12`
+1. 日用品 Tab → **🎤 语音记账**（或「输入一句话」降级）
+2. 示例：
+   - `加 10 包方便面` → 匹配或新建「方便面」，purchase +10
+   - `用掉 2 卷卫生纸` → usage -2
+   - `猫粮还剩大概 3 袋，改成 3` → 直接改 `current_stock`（set）
+   - `把湿巾的单位改成包` → 改字段（可选，二期）
+3. 展示：识别文本 + LLM 解析预览（可编辑）→ **确认写入**
+4. toast：`方便面 +10 包（购买），库存 12`
 
-### 7.2 推荐架构（家庭自托管）
+### 7.2 架构（已定：LLM 解析）
 
 ```
-浏览器麦克风
-    │  MediaRecorder (webm/ogg)
+麦克风 / 文本框
+    │
     ▼
-POST /api/items/voice   (multipart: audio 文件)
-    │
-    ├─ 1) STT 语音转文字
-    │     路径 A（推荐先做）：浏览器 Web Speech API（Chrome 中文）→ 前端直接拿 text
-    │     路径 B：后端 Whisper（本地 faster-whisper 或 OpenAI-compatible STT）
-    │
-    ├─ 2) 解析 text → 结构化指令
-    │     优先：规则 + 轻量正则 / 简单槽位（中文数量词）
-    │     可选增强：本地小模型 / 云端 LLM 做纠错（非必须）
-    │
-    └─ 3) 执行库存动作（复用现有 purchase / usage / create item）
+[STT] 语音 → 文字
+    │  优先：浏览器 Web Speech API（Chrome 中文）
+    │  备选：后端 Whisper / OpenAI-compatible STT
+    ▼
+[LLM] 文字 + 当前物品清单 → 结构化 JSON 指令
+    │  OpenAI-compatible Chat Completions
+    │  （可用用户已有的 New API / 任意兼容端点）
+    ▼
+[预览确认] 前端展示 actions[]
+    ▼
+[执行] 服务端按 JSON 调 create / purchase / usage / patch stock
 ```
 
-**为什么先做路径 A（浏览器识别）？**
+**职责划分：**
 
-| | 浏览器 Web Speech | 后端 Whisper |
-|--|------------------|--------------|
-| 依赖 | 几乎无（HTTPS 或 localhost） | 模型体积大或需 API Key |
-| 中文 | Chrome 可用，Safari/部分环境差 | 一般更稳 |
-| Docker/局域网 HTTP | 非 HTTPS 时浏览器可能禁用麦克风 | 不受此限（前端仍要麦克风权限） |
-| 实现量 | 小 | 中～大 |
+| 步骤 | 谁做 | 说明 |
+|------|------|------|
+| 语音→文字 | STT | 不要求聊天模型做 ASR（除非端点同时支持 audio） |
+| 文字→改库存意图 | **LLM（必选）** | 中文口语、别名、多物品一句话 |
+| 真正写库 | HomeDash 后端 | **LLM 不直连数据库**；只产出 JSON，服务端校验后执行 |
 
-**落地建议：**
+### 7.3 LLM 输入 / 输出约定
 
-1. **Phase 7a**：前端 Web Speech → 文本框可编辑 → `POST /api/items/parse_and_apply` 只收文本  
-2. **Phase 7b**（可选）：后端 STT，上传音频，解决非 Chrome / 纯 HTTP 场景  
+**请求侧塞给模型的上下文（每次）：**
 
-你举例的「+10 包方便面」在 7a 就能闭环。
+- 用户原话 `text`
+- 现有物品精简列表：`[{id, name, unit, category, current_stock}, ...]`（控制 token，名称优先）
+- 系统提示：只允许输出 JSON；动作枚举见下；匹配已有名称优先；没有则 `create: true`
 
-### 7.3 意图与解析规则（先规则，不上大模型）
-
-**动作 action：**
-
-| 说法 | action | 库存方向 |
-|------|--------|----------|
-| 加 / 增加 / 买了 / 购入 / + | `purchase` | 加库存 + 写 purchase_logs |
-| 用掉 / 吃了 / 消耗 / 少了 / - | `usage` | 减库存 + 写 usage_logs |
-| 仅名词+数量且无动词 | 默认 `purchase`（入库更常见） | |
-
-**数量 amount：**
-
-- 阿拉伯数字：`10`、`0.5`、`2.5`
-- 中文数字：`十` `两` `三` `半` → 10 / 2 / 3 / 0.5
-- 与单位粘连：`10包` `两卷` `一袋`
-
-**单位 unit（可选，新建条目时用）：**
-
-`包|袋|卷|瓶|支|盒|桶|kg|g|升|L|个|提`
-
-**物品名 name：**
-
-- 去掉动作词、数量、单位后的剩余中文，如 `方便面`
-- 与已有 items **模糊匹配**：完全相等 > 包含 > 编辑距离（简单即可）
-- 匹配到唯一项 → 用已有 id；匹配到多个 → 返回候选让用户选；匹配不到 → **自动创建**（你提的需求）
-
-**新建条目默认：**
+**模型输出 JSON Schema（服务端严格校验）：**
 
 ```json
 {
-  "name": "方便面",
-  "category": "冷冻",   // 可先 "其他"，或简单关键词表猜：面/饺/汤圆→冷冻，猫→宠物
-  "unit": "包",         // 从话术提取，默认「个」
-  "current_stock": 0,
-  "min_stock": 1
+  "actions": [
+    {
+      "action": "purchase | usage | set_stock | create_and_purchase",
+      "item_id": 3,
+      "name": "方便面",
+      "amount": 10,
+      "unit": "包",
+      "category": "冷冻",
+      "note": "可选",
+      "create": false
+    }
+  ],
+  "display": "方便面 +10 包（购买）",
+  "confidence": "high | medium | low"
 }
 ```
 
-然后立刻对该 id 做 `purchase(amount=10)`。
+**动作语义：**
 
-### 7.4 API 设计
+| action | 行为 |
+|--------|------|
+| `purchase` | 已有物品：加库存 + purchase_logs |
+| `usage` | 已有物品：减库存 + usage_logs |
+| `set_stock` | 直接把 `current_stock` 设为 amount（盘点：「改成 3 袋」） |
+| `create_and_purchase` | 新建物品再 purchase；`create: true` |
+
+**服务端硬校验（防胡写）：**
+
+- `action` 必须在白名单
+- `amount` 必须为有限正数（`set_stock` 允许 0）
+- `item_id` 若给了必须存在；不存在则按 `name` 再匹配
+- 单次 `actions` 最多 N 条（如 5），防止一次清空库存
+- LLM 超时 / 非 JSON → 返回错误，**不写库**
+- 可选：规则解析做 fallback（LLM 挂了还能用简单句）；默认仍以 LLM 为主
+
+### 7.4 配置（OpenAI-compatible）
+
+| 变量 | 说明 |
+|------|------|
+| `LLM_BASE_URL` | 如 `https://api.openai.com/v1` 或家中 New API 地址 |
+| `LLM_API_KEY` | Bearer Key |
+| `LLM_MODEL` | 如 `gpt-4o-mini` / 用户自选小模型 |
+| `LLM_TIMEOUT_SEC` | 默认 30 |
+| `VOICE_CONFIRM_REQUIRED` | 默认 `true`（必须确认再 apply） |
+
+依赖：已有 `httpx`，足够调 Chat Completions；**不**把大模型打进 Docker 镜像。
+
+### 7.5 API
 
 ```http
-# 只解析不写库（预览）
+# 预览：STT 后的 text，或用户手打
 POST /api/items/voice/parse
 {"text": "加 10 包方便面"}
 
 → {
   "ok": true,
-  "action": "purchase",
-  "name": "方便面",
-  "amount": 10,
-  "unit": "包",
-  "matched_item_id": 3,      // 或 null
-  "will_create": false,
-  "confidence": "high",
-  "display": "方便面 +10 包（购买）"
+  "source": "llm",
+  "raw_text": "加 10 包方便面",
+  "actions": [...],
+  "display": "方便面 +10 包（购买）",
+  "confidence": "high"
 }
 
-# 解析并执行（确认后）
+# 确认执行（可回传 parse 的 actions，避免二次 LLM）
 POST /api/items/voice/apply
-{"text": "加 10 包方便面"}   // 或直接传 parse 结果结构
-→ {"ok": true, "item_id": 3, "current_stock": 12, "created": false}
+{"actions": [...], "raw_text": "..."}
+→ {"ok": true, "results": [{"item_id": 3, "current_stock": 12, "created": false}]}
 
-# 可选：音频 STT（Phase 7b）
-POST /api/items/voice/transcribe
-Content-Type: multipart/form-data; audio=@blob
-→ {"text": "加十包方便面"}
+# 可选 STT
+POST /api/items/voice/transcribe  (multipart audio)
+→ {"text": "..."}
 ```
 
-### 7.5 前端
+前端也可：Web Speech 得到 text → 只调 `parse` / `apply`。
 
-- 日用品 Tab 工具栏增加 `🎤 语音记账`
-- 支持：按住说话 / 点按开始-结束
-- 识别中显示波形或「正在听…」
-- 结果进入底部 sheet：可改文字后「确认写入」
-- 无麦克风权限、非安全上下文：降级为「手动输入一句话」文本框（同一套 parse/apply）
+### 7.6 前端
 
-### 7.6 安全与坑
+- 🎤 按钮 + 识别中状态
+- 解析预览 sheet：展示 LLM `display` 与可编辑 JSON/表单项
+- 确认后 `apply`
+- 无麦克风：同一套「打一句话」
+- LLM 未配置时：按钮提示「未配置 LLM_BASE_URL」，不静默失败
 
-- 仅家庭内网，不做账号体系；语音接口同样无鉴权（与现有 API 一致）
-- 误识别风险：必须有确认步或可撤销（可选：apply 后 10 秒内 undo 上一条）
-- Docker 下浏览器访问 `http://IP` 时，**部分浏览器禁止麦克风** → 文档写明：用 Chrome + localhost 反代 HTTPS，或改用「打字一句话」降级
-- 不把音频默认落盘；若调试需要，写 `data/voice_debug/` 且 gitignore
+### 7.7 安全与坑
 
-### 7.7 实现文件（预估）
+- 家庭内网无登录；LLM Key 只放服务端 `.env`
+- **禁止**把完整 `.env`、SMTP 密码、设备 token 塞进 LLM 上下文；只传物品名/库存等必要字段
+- 默认确认写入；`confidence=low` 时强制确认
+- Gmail 与 LLM 都依赖出网；透明代理环境需保证容器能访问 `smtp.gmail.com` 与 `LLM_BASE_URL`
+- 局域网 HTTP 麦克风限制：文档说明 + 文本降级
 
-- `app/modules/items_voice.py` 或 `items.py` 内新路由：parse / apply
-- `app/static/app.js`：麦克风 + UI
-- `app/static/style.css`：按钮与 sheet
-- 可选 `faster-whisper` 或 OpenAI-compatible HTTP STT（仅 7b，写进可选依赖，不塞进默认 requirements）
-- 自检：纯文本用例  
-  - `加10包方便面` → purchase 10 方便面  
-  - `用掉两卷卫生纸` → usage 2  
-  - 无条目时 will_create true  
+### 7.8 实现文件（预估）
 
-### 7.8 与「打模型」的关系
-
-你说的「语音打模型转文字」可以拆成：
-
-| 步骤 | 要不要模型 |
-|------|------------|
-| 语音 → 文字 | STT（浏览器或 Whisper），不是聊天模型 |
-| 文字 → 加库存指令 | **规则解析通常够**；只有口语很乱时才上 LLM |
-| 写库存 | 现有 API，不需要模型 |
-
-**推荐默认：STT + 规则解析**，成本低、可离线、可测。  
-若以后口语复杂（「把昨天吃的那袋猫粮补上」），再加可选 LLM 解析开关 `VOICE_LLM_URL`。
+- `app/modules/voice_llm.py`：拼 prompt、调 LLM、校验 JSON
+- `app/modules/items.py` 或独立路由：parse / apply 执行器
+- `app/static/app.js` + `style.css`：🎤 UI
+- `.env.example`：Gmail + LLM 变量
+- 自检：mock LLM 返回固定 JSON 时 apply 路径正确；非法 action 拒绝
 
 ### 7.9 明确不做（本期）
 
-- 不做连续对话式多轮管家
-- 不做声纹识别 / 区分夫妻账号
-- 不做离线端侧大模型包进默认镜像（镜像会暴涨）
+- 不做多轮闲聊管家
+- 不做声纹 / 多用户权限
+- 不做默认镜像内置本地 7B 模型
+- LLM **不**直接执行 SQL
 
 ---
 
@@ -511,9 +532,8 @@ Content-Type: multipart/form-data; audio=@blob
 
 | 顺序 | 待办 | 原因 |
 |------|------|------|
-| 1 | 0 预测 EWMA | 你先大批量登记后收益最大 |
-| 2 | 6 周报邮件 | 简单、立刻减轻开面板负担 |
-| 3 | 7a 语音（Web Speech + 文本解析） | 体验提升大，可先不做后端 Whisper |
+| 1 | 0 预测 EWMA | 大批量登记后收益最大 |
+| 2 | 6 Gmail 周报邮件 | 简单；通道已定为 Gmail |
+| 3 | 7 语音 + **LLM 解析写库存** | 体验核心；依赖 LLM 端点配置 |
 | 4 | 1 Docker 验收 / 2 灯光 props | 按需 |
-| 5 | 7b 后端 STT | 环境需要时再做 |
 | 推迟 | 4 粘贴导入 | 仍推迟 |
