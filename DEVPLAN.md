@@ -255,12 +255,16 @@ Content-Type: application/json
 
 ---
 
-## 待办 6：周报邮件提醒（库存/需购买）— **规格，尚未开发**
+## 待办 6：周报邮件提醒（库存/需购买 + **重点待办**）— **规格，尚未开发**
 
 **难度**：★☆☆☆☆ 简单  
-**目标**：每周自动发一封中文邮件，汇总家里剩余与「需要购买」清单。  
-**场景**：两口之家，不想天天打开面板，周末采购前看一眼邮件即可。  
-**邮件通道（已定）**：**Gmail SMTP**（应用专用密码 App Password，不是谷歌登录密码）。
+**目标**：每周自动发一封中文 Gmail，汇总：  
+1）日用品剩余 / 需要购买；  
+2）**家庭重点待办事项**（未完成的高优先级 to-do）。  
+**场景**：两口之家周末采购 + 家务/杂事提醒，一封邮件看完。  
+**邮件通道（已定）**：**Gmail SMTP**（App Password，不是谷歌登录密码）。
+
+> **重点待办**的完整数据模型与页面见 **待办 8**。本待办负责「邮件怎么带上它们」；实现顺序建议 **先 8 再 6**，或同一次做：有 todos 表才能写进周报。
 
 ### 6.1 产品行为
 
@@ -268,53 +272,64 @@ Content-Type: application/json
 - **触发方式**（实现时二选一，优先 B 更易测；A 更省事）：
   - **A. 容器内 APScheduler / 后台 asyncio 定时**（自包含）
   - **B. 暴露 `POST /api/notify/weekly` + 宿主机 cron / Hermes cron 调**
-- **静默策略**：若「需购买」为空且开启 `NOTIFY_ONLY_WHEN_NEED_BUY=true`，可跳过发送（可选）
-- **手动试发**：`POST /api/notify/test` 立即发一封测试邮件到 `NOTIFY_TO`
+- **静默策略**（可选，默认 false 仍发送）：
+  - `NOTIFY_ONLY_WHEN_NEED_BUY=true` 且「需购买」为空 **且**「未完成重点待办」为空 → 跳过
+- **手动试发**：`POST /api/notify/test` 立即发测试邮件到 `NOTIFY_TO`
 
 ### 6.2 邮件内容（先纯文本）
 
 ```
-主题：HomeDash 周报 · 需购买 N 项 · YYYY-MM-DD
+主题：HomeDash 周报 · 待办 A 项 · 需买 B 项 · YYYY-MM-DD
+
+【重点待办】（未完成，按优先级+截止日期排序）
+- [高] 换净水器滤芯 · 截止 2026-07-20 · 负责人: 双方
+- [中] 给猫打疫苗 · 截止 2026-08-01
+- （无则写：本周无未完成重点待办）
 
 【需要购买】
 - 卫生纸：剩余 2 卷，预计 5 天，建议买 10 卷
 - 猫砂：剩余 0.5 袋，预计 3 天，建议买 2 袋
+- （无则写：暂无需要购买的日用品）
 
-【库存一览】（可选，或仅列不足 14 天的）
+【库存摘要】（可选：仅预计 <14 天或 need_buy）
 - 方便面：12 包，预计 40 天
-...
 
-打开面板：http://<你的主机>:<端口>/
+打开面板：http://<主机>:<端口>/
 ```
 
-数据来源：复用现有 items + `predict_item`，**不重写预测**。
+**排序规则（重点待办进邮件）：**
+
+1. 仅 `status != done`（未完成）
+2. 优先级 high → medium → low
+3. 有 `due_date` 的靠前；过期的标 `⚠ 已过期`
+4. 最多列出 N 条（默认 20），超出写「另有 M 项见面板」
+
+数据来源：
+
+- 日用品：现有 items + `predict_item`
+- 重点待办：`todos` 表（待办 8）
 
 ### 6.3 Gmail 配置（`.env` / `.env.example`）
 
-> 实现前用户需在 Google 账号开启两步验证，并生成 **应用专用密码**（App Password）。  
-> **禁止**把真实密码写进仓库；文档只写占位符。
+> 实现前用户需在 Google 账号开启两步验证，并生成 **应用专用密码**。  
+> **禁止**把真实密码写进仓库。
 
 | 变量 | Gmail 推荐值 | 说明 |
 |------|--------------|------|
 | `SMTP_HOST` | `smtp.gmail.com` | 固定 |
 | `SMTP_PORT` | `587` | STARTTLS（推荐）；或 `465` SSL |
 | `SMTP_USER` | `you@gmail.com` | 完整 Gmail 地址 |
-| `SMTP_PASSWORD` | `xxxx xxxx xxxx xxxx` | **16 位应用专用密码**，不是登录密码 |
-| `SMTP_FROM` | 同 USER 或 `HomeDash <you@gmail.com>` | 发件显示名 |
-| `NOTIFY_TO` | `you@gmail.com,spouse@gmail.com` | 收件人，逗号分隔 |
+| `SMTP_PASSWORD` | `xxxx xxxx xxxx xxxx` | **16 位 App Password** |
+| `SMTP_FROM` | `HomeDash <you@gmail.com>` | 发件显示名 |
+| `NOTIFY_TO` | `you@gmail.com,spouse@gmail.com` | 收件人 |
 | `NOTIFY_CRON` | `0 18 * * 0` | 每周日 18:00 |
 | `NOTIFY_TZ` | `Asia/Shanghai` | |
 | `NOTIFY_ENABLED` | `true` | 总开关 |
-| `NOTIFY_ONLY_WHEN_NEED_BUY` | `false` | 仅有需购买时才发 |
-| `HOMEDASH_PUBLIC_URL` | `http://192.168.x.x:8088` | 邮件正文里的面板链接（可选） |
+| `NOTIFY_ONLY_WHEN_NEED_BUY` | `false` | 名称保留；语义扩展为「需买与待办都空才跳过」时可再加 `NOTIFY_SKIP_IF_EMPTY` |
+| `NOTIFY_TODO_LIMIT` | `20` | 邮件最多列几条重点待办 |
+| `HOMEDASH_PUBLIC_URL` | `http://192.168.x.x:8088` | 正文面板链接 |
 
-实现：stdlib `smtplib` + `email`。Gmail 注意：
-
-- 必须用 App Password；普通密码会 auth 失败
-- 国内网络访问 `smtp.gmail.com` 若不通，需本机已有代理/出网环境（部署时实测；失败要在日志里写清）
-- 单日发送量家庭周报完全够用，无需 Gmail API OAuth（SMTP 足够）
-
-`.env.example` 片段（实现时写入）：
+Gmail 注意：App Password；国内出网；家庭周报无需 Gmail API OAuth。
 
 ```env
 # --- 邮件周报（Gmail）---
@@ -328,29 +343,141 @@ NOTIFY_ENABLED=false
 NOTIFY_CRON=0 18 * * 0
 NOTIFY_TZ=Asia/Shanghai
 NOTIFY_ONLY_WHEN_NEED_BUY=false
+NOTIFY_TODO_LIMIT=20
 HOMEDASH_PUBLIC_URL=http://127.0.0.1:8088
 ```
 
 ### 6.4 API（建议）
 
 ```
-POST /api/notify/test     → 立即发测试邮件 {ok, to, subject}
+POST /api/notify/test     → 立即发测试邮件（含当前待办+库存摘要）
 POST /api/notify/weekly   → 与定时任务同一套逻辑
-GET  /api/notify/config   → 脱敏：enabled / has_smtp / to_count / host（不回密码）
+GET  /api/notify/config   → 脱敏：enabled / has_smtp / to_count / host
 ```
 
 ### 6.5 实现文件（预估）
 
-- 新建 `app/modules/notify.py`
-- `app/main.py` 挂载路由；（可选）lifespan 调度
-- `.env.example`、README「Gmail 周报」小节
-- 自检：未配置时不崩溃；dry-run 打印正文
+- `app/modules/notify.py`：组信（todos + items）+ SMTP
+- 依赖待办 8 的查询函数，如 `list_open_todos(limit)`
+- `app/main.py` 挂载；（可选）调度
+- `.env.example`、README
 
 ### 6.6 明确不做（本期）
 
-- 不做 QQ/163 多厂商向导（SMTP 字段通用，但文档与默认示例只写 Gmail）
-- 不做 Gmail OAuth / Gmail API
-- 不做推送 App / 企业微信（可后续加通道）
+- 不做每条待办单独每日邮件（周报合并一封）
+- 不做 QQ/163 向导、Gmail OAuth
+- 不做推送 App
+
+---
+
+## 待办 8：重点待办事项（家庭 To-Do）— **规格，尚未开发**
+
+**难度**：★★☆☆☆  
+**目标**：记录家里**重点待办**（家务、维修、预约、账单等），面板可管理，并进入 **Gmail 周报**（待办 6）。  
+**不是**软件开发任务列表，是「家里这两周必须盯的事」。
+
+### 8.1 产品范围
+
+**要做：**
+
+- 新增 / 编辑 / 完成 / 删除重点事项
+- 字段：标题、备注、优先级、截止日期、负责人（可选）、状态
+- 前端独立 Tab 或日用品旁入口（建议第四 Tab：**待办**，或「日用品」页上方区块；实现时优先 **第四 Tab「重点待办」**，信息架构更清晰）
+- 列表默认只显示未完成；可切换「已完成」
+- 与邮件：未完成项进入周报【重点待办】区
+
+**示例条目：**
+
+- 换净水器滤芯（高，截止本月底）
+- 给猫打疫苗（高）
+- 交物业费（中，截止日）
+- 清理阳台（低）
+
+### 8.2 数据模型
+
+在 `app/database.py` 的 `SCHEMA` 增加（`CREATE TABLE IF NOT EXISTS`，无迁移工具）：
+
+```sql
+CREATE TABLE IF NOT EXISTS todos (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,              -- 简短标题
+    note TEXT,                        -- 备注
+    priority TEXT DEFAULT 'medium',   -- high | medium | low
+    status TEXT DEFAULT 'open',       -- open | done
+    due_date TEXT,                    -- YYYY-MM-DD，可空
+    assignee TEXT,                    -- 可选：我 / 配偶 / 双方 / 自由文本
+    created_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT,                -- 完成时写入
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+```
+
+**约束：**
+
+- `priority` ∈ {high, medium, low}
+- `status` ∈ {open, done}
+- 完成时：`status=done` 且 `completed_at=now`；重新打开则清空 `completed_at`
+
+### 8.3 API
+
+```
+GET    /api/todos?status=open|done|all   默认 open
+POST   /api/todos                        创建
+GET    /api/todos/{id}
+PUT    /api/todos/{id}                   编辑字段
+POST   /api/todos/{id}/done              标记完成
+POST   /api/todos/{id}/reopen            重新打开
+DELETE /api/todos/{id}
+
+# 供邮件/汇总
+GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
+```
+
+**POST body 示例：**
+
+```json
+{
+  "title": "换净水器滤芯",
+  "note": "柜下 3M，备件在储物间",
+  "priority": "high",
+  "due_date": "2026-07-31",
+  "assignee": "双方"
+}
+```
+
+排序：`open` 列表 = priority 权重 DESC，`due_date` ASC NULLS LAST，`id` DESC。
+
+### 8.4 前端（第四 Tab 建议）
+
+`index.html` 增加 Tab：`设备 | 监控 | 日用品 | 待办`（改骨架允许；与「尽量不改 index」的旧约束冲突时，**以本待办为准**）。
+
+- 列表卡片：标题、优先级色点、截止日期、负责人
+- 过期：`due_date < today && open` → 红色「已过期」
+- 快捷：点圆圈标记完成
+- 添加按钮 → 底部 sheet 表单
+- 中文 UI，米家浅色风格与现有页一致
+
+### 8.5 与语音 / LLM（可选联动，二期）
+
+待办 7 的 LLM 若已通，可扩展 action：
+
+- `create_todo` / `complete_todo`  
+本期 **不强制**；先保证表单 CRUD + 进邮件。
+
+### 8.6 实现文件（预估）
+
+- `app/database.py`：SCHEMA 加 `todos`
+- `app/modules/todos.py`：CRUD + summary + `__main__` 自检
+- `app/main.py`：挂载 router
+- `app/static/index.html` / `app.js` / `style.css`：第四 Tab
+- 待办 6 的 `notify.py` 调用 `list_open_todos`
+
+### 8.7 明确不做（本期）
+
+- 不做子任务 / 看板 / 番茄钟
+- 不做多人登录权限（assignee 只是标签）
+- 不做日历同步（Google Calendar）
+- 不做每条待办单独 push
 
 ---
 
@@ -533,7 +660,8 @@ POST /api/items/voice/transcribe  (multipart audio)
 | 顺序 | 待办 | 原因 |
 |------|------|------|
 | 1 | 0 预测 EWMA | 大批量登记后收益最大 |
-| 2 | 6 Gmail 周报邮件 | 简单；通道已定为 Gmail |
-| 3 | 7 语音 + **LLM 解析写库存** | 体验核心；依赖 LLM 端点配置 |
-| 4 | 1 Docker 验收 / 2 灯光 props | 按需 |
+| 2 | **8 重点待办事项** | 周报要带待办，须先有数据与页面 |
+| 3 | **6 Gmail 周报**（库存 + 重点待办） | 依赖 8；通道 Gmail |
+| 4 | 7 语音 + LLM 解析写库存 | 体验核心；可二期挂 create_todo |
+| 5 | 1 Docker 验收 / 2 灯光 props | 按需 |
 | 推迟 | 4 粘贴导入 | 仍推迟 |
