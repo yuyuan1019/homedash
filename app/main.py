@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.database import init_db
-from app.modules import items, devices, uptime
+from app.modules import ai_workbench, devices, items, notify, todos, uptime
 
 
 @asynccontextmanager
@@ -20,6 +20,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="HomeDash - 家庭管理面板", lifespan=lifespan)
 app.include_router(items.router, prefix="/api")
 app.include_router(devices.router, prefix="/api")
+app.include_router(ai_workbench.router, prefix="/api")
+app.include_router(notify.router, prefix="/api")
+app.include_router(todos.router, prefix="/api")
 app.include_router(uptime.router, prefix="/api")
 
 # 静态前端（Phase 2 提供；目录不存在则跳过，不阻塞 API）

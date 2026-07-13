@@ -1,6 +1,6 @@
 # 🏠 HomeDash
 
-家庭自托管管理面板：**米家设备控制 · Uptime 监控 · 日用品库存预测 ·（规划）重点待办 · Gmail 周报 · AI 工作台**。
+家庭自托管管理面板：**米家设备控制 · Uptime 监控 · 日用品库存预测 · 重点待办 · SMTP 周报 · AI 工作台**。
 
 中文 UI，无前端框架，Docker 可一键部署。
 
@@ -20,20 +20,23 @@
 |------|------|------|
 | 米家设备 | ✅ 已实现 | WiFi 局域网 `python-miio` + BLE Mesh 云端 MIOT |
 | Uptime 监控 | ✅ 已实现 | 只读挂载 Uptime Kuma SQLite，60s 缓存 |
-| 日用品库存 | ✅ 已实现 | CRUD + 消耗/购买 + 线性预测 + 购物清单 |
+| 日用品库存 | ✅ 已实现 | CRUD + 消耗/购买 + EWMA 预测 + 安全库存 + 购物清单 |
 | 设备状态 | ✅ 已实现 | `GET /api/devices/status` best-effort |
+| 设备展示管理 | ✅ 已实现 | 隐藏/恢复设备，不修改 YAML 或设备配置 |
 | Docker 部署 | ✅ 已实现 | `Dockerfile` + Compose，端口/Kuma 目录可配 |
-| 日用品预测升级 | ⬜ 规划中 | EWMA + 安全库存（DEVPLAN 待办 0） |
-| 重点待办 | ⬜ 规划中 | 家庭 to-do + home agent 接口（待办 8） |
-| Gmail 周报 | ⬜ 规划中 | 待办 + 需购买邮件（待办 6） |
-| AI 工作台 | ⬜ 规划中 | 自然语言 → 白名单写库（待办 7） |
+| 日用品预测升级 | ✅ 已实现 | EWMA + 安全库存 + 品类先验 / 购买间隔兜底（DEVPLAN 待办 0） |
+| 重点待办 | ✅ 已实现 | 家庭 to-do + home agent 提醒接口（待办 8） |
+| SMTP 周报 | ✅ 已实现 | QQ 邮箱发送待办 + 需购买周报（待办 6） |
+| AI 工作台 | ✅ 已实现 | 自然语言 → 白名单动作预览 → 确认写库（待办 7） |
 
 ### 1. 米家设备控制（已实现）
 
 - **WiFi**：python-miio 局域网直控，不经 HA
 - **BLE Mesh**：micloud + 小米云端 MIOT（墙壁开关等）
 - 开关 + 自定义命令透传；前端按类型双列卡片（米家浅色风格）
-- 云端设备显示「云端」标签；`GET /api/devices/status` 查 online/power
+- 云端设备显示「云端」标签；`GET /api/devices/status` 查 online/power、更新时间与脱敏失败摘要
+- 设备页「管理设备」可隐藏或恢复显示；隐藏仅保存到 SQLite 展示偏好，不修改 YAML、不删除设备、不影响现有开关接口
+- 当前设备控制仅保留开关与 WiFi 原始命令，不提供亮度、色温、温度等属性控制
 
 ### 2. Uptime 监控（已实现）
 
@@ -41,27 +44,72 @@
 - 60 秒缓存，读失败保留旧数据
 - 展示 up/down、延迟
 
-### 3. 日用品管理（已实现 + 规划增强）
+### 3. 日用品管理（已实现）
 
 **已实现：**
 
 - 记录消耗 / 购买，自动改库存
-- **预测（现状）**：全历史线性日均 → 预计耗尽；`<7` 天需买；建议量覆盖约 30 天
+- **预测**：相邻消耗记录 EWMA 日均（近期权重更高）→ 预计耗尽；库存低于安全库存或预计 `<7` 天时需买；建议量覆盖约 30 天
+- **冷启动兜底**：无/少用量记录时按购买间隔中位数、品类先验或最低库存提示；返回信心等级与预测方法
 - 购物清单汇总
-
-**规划中**（未实现，见 `DEVPLAN.md`）：
-
-| 待办 | 内容 |
-|------|------|
-| 0 | EWMA + 安全库存 + 品类先验（两口·120㎡） |
-| 8 | 重点待办事项 + `/api/agent/todos/*`（供 home agent 投递 QQ/微信） |
-| 6 | Gmail 周报 = 重点待办 + 需购买/库存 |
-| 7 | **AI 工作台**：人话 → LLM JSON 动作 → 确认后写库存/待办（**禁止直接 SQL**） |
 
 **集成约定：**
 
 - 微信 / QQ 消息由外部 **home agent（如 Hermes）** 发送，HomeDash 只提供数据与 `remind-fired` 回写
 - AI 只通过 **白名单动作总线** 改业务表，不执行任意 SQL
+
+### 4. 重点待办（已实现）
+
+- 独立「重点待办」Tab：新建、编辑、完成、重开、删除，支持优先级、截止日期、负责人、备注
+- 可登记下次提醒时间、QQ / 微信 / 邮件频道意图及一次/每日/每周重复规则
+- `home agent` 轮询 `/api/agent/todos/due`，转发服务端生成的中文 `message` 后调用 `remind-fired`；HomeDash 不实现 QQ/微信协议
+- `AGENT_API_TOKEN` 非空时，agent 路径必须带 `X-HomeDash-Token` 或 `Authorization: Bearer`；未配置仅适用于内网
+
+### 4.1 Hermes / AI 提醒对接
+
+HomeDash 是重点待办和提醒意图的数据源，**不会主动推送** QQ、微信、Telegram 或任何 IM，也不内置 cron、机器人协议或后台轮询。Hermes 或安装了 HomeDash skill 的 AI 应自行在合适的时机查询接口、调用自己的消息通道，并在发送成功后回写状态。
+
+| 接口 | 外部 AI / Hermes 用途 |
+|------|------|
+| `GET /api/agent/todos/due` | 查询当前到点、应提醒的未完成待办；响应中的 `message` 可直接转发 |
+| `GET /api/agent/todos/open?priority=high` | 查询未完成待办，回答“有什么高优先级事项” |
+| `POST /api/agent/todos` | 根据用户指令创建待办 |
+| `POST /api/agent/todos/{id}/done` | 用户确认完成后回写状态 |
+| `PUT /api/agent/todos/{id}/remind` | 修改提醒时间、频道或重复策略 |
+| `POST /api/agent/todos/{id}/remind-fired` | 外部消息实际发送成功后回写，防止重复提醒 |
+
+当设置 `AGENT_API_TOKEN` 时，请求必须携带以下任一请求头；不要把 token 写进 skill、日志或公开文档：
+
+```http
+X-HomeDash-Token: <AGENT_API_TOKEN>
+```
+
+```text
+外部 AI / Hermes 推荐逻辑：
+  在用户询问待办时：GET /api/agent/todos/open
+  在自身定时任务或被唤醒时：GET /api/agent/todos/due?within_minutes=15
+  对每个 item：按自身已有 QQ / 微信等通道发送 item.message
+  仅在发送成功后：POST /api/agent/todos/{id}/remind-fired
+```
+
+- `once`：回写成功后 HomeDash 清空 `remind_at`，不会再次返回。
+- `daily` / `weekly`：回写成功后 HomeDash 分别把提醒时间推进 1 天 / 7 天。
+- 发送失败时不要调用 `remind-fired`，下次查询仍会返回该提醒。
+- SMTP 周报是独立能力，HomeDash 也只暴露 `POST /api/notify/weekly` 供宿主机或 Hermes 按需调用，不主动调度。
+
+### 5. SMTP 周报（已实现）
+
+- `POST /api/notify/test` 立即试发；`POST /api/notify/weekly` 按 `NOTIFY_ENABLED` 和静默策略发送；`GET /api/notify/config` 仅返回脱敏状态
+- 汇总未完成重点待办与需购买日用品；SMTP 465 使用 SSL，其他端口使用 STARTTLS
+- QQ 邮箱发件账号与两位收件人通过本地 `.env` 的 `SMTP_*`、`NOTIFY_TO` 配置；SMTP 授权码不会经 API、页面或日志输出
+- 已通过 Docker 从 QQ SMTP 向两位收件人实发验证（以收件箱确认成功）
+
+### 6. AI 工作台（已实现）
+
+- 第五个「AI 工作台」Tab 接收中文文本指令，调用 OpenAI-compatible LLM 生成动作预览
+- `POST /api/ai/parse` 只解析不写库；`POST /api/ai/apply` 只执行白名单动作；`GET /api/ai/audit` 查询审计
+- 支持库存购买、消耗、盘点、新建/更新物品，及重点待办的新建、完成、重开、更新、删除；支持只读查询需买物品和待办
+- LLM 不能执行 SQL、不能控制米家设备；非法操作、SQL 关键词、越界数值都会被服务端拒绝
 
 ---
 
@@ -96,15 +144,15 @@ micloud
 
 不引入：ORM、前端打包器、Redis、jinja2、pytest（用模块 `__main__` 自检）。
 
-### 规划中将用到的能力（不预先塞进默认镜像）
+### 已实现与可选能力
 
 | 能力 | 方案 | 对应待办 |
 |------|------|----------|
-| 邮件 | stdlib `smtplib` + Gmail App Password | 6 |
+| 邮件 | stdlib `smtplib` + QQ 邮箱 SMTP 授权码 | 6 |
 | AI | OpenAI-compatible Chat（`LLM_BASE_URL` + Key），服务端执行器写库 | 7 |
-| 语音输入 | 浏览器 Web Speech 或可选 STT；**不是**必须本地大模型 | 7 |
-| IM 提醒 | home agent 调 `/api/agent/todos/due` 后发 QQ/微信 | 8 |
-| 定时 | Compose 内调度 **或** 宿主机/Hermes cron 调 notify API | 6 / 8 |
+| 语音输入 | 浏览器 Web Speech 或可选 STT；**不是**必须本地大模型 | 未实现 |
+| IM 提醒 | 外部 AI / home agent 查询 `/api/agent/todos/*` 后自行发送 | 部署侧 |
+| 定时 | 宿主机/Hermes 按需调用 notify / due 接口；HomeDash 不内置调度 | 部署侧 |
 
 ---
 
@@ -126,15 +174,15 @@ micloud
   WiFi/云    (只读挂载)    items/logs/〔todos〕/〔ai_audit〕
 
 外部：
-  Gmail SMTP  ←── notify 周报（规划）
-  LLM API     ←── AI 工作台 parse（规划）
-  home agent  ←── agent/todos due → QQ/微信（规划）
+  QQ 邮箱 SMTP  ←── notify 周报
+  LLM API     ←── AI 工作台 parse
+  Hermes / AI ←── 主动查询 agent/todos；自行发 IM
 ```
 
 ### 设计原则
 
 1. **家庭内网优先**，默认无用户登录；敏感文件不进 Git  
-2. **领域模块清晰**：设备 / 监控 / 库存 /（规划）待办 / 通知 / AI 分文件  
+2. **领域模块清晰**：设备 / 监控 / 库存 / 待办 / 通知 / AI 分文件
 3. **预测与写库可测**：`predict_item` 纯函数；模块尾部 `__main__` 自检  
 4. **AI 不直连 SQL**：只产出白名单 `op`，执行器调现有业务函数  
 5. **IM 不进主进程**：HomeDash 不实现微信/QQ 协议，只留 HTTP 给 agent  
@@ -147,9 +195,9 @@ micloud
 | 开关灯 | 前端 → `/api/devices/{name}/on|off` → miio 或云端 MIOT |
 | 看监控 | 前端 → `/api/uptime/status` → 只读查 Kuma DB（缓存） |
 | 记消耗 | 前端 → `/api/items/{id}/usage` → 减库存 + usage_logs → 预测重算 |
-| AI 改数据（规划） | 工作台 → `/api/ai/parse` → LLM JSON → 用户确认 → `/api/ai/apply` → 执行器 |
-| 到点提醒（规划） | agent 轮询 `/api/agent/todos/due` → 发 QQ/微信 → `remind-fired` |
-| 周报（规划） | 定时/cron → 组【待办+需买】→ Gmail SMTP |
+| AI 改数据 | 工作台 → `/api/ai/parse` → LLM JSON → 用户确认 → `/api/ai/apply` → 执行器 |
+| 到点提醒 | Hermes / AI 主动查询 `/api/agent/todos/due` → 自身通道发 IM → `remind-fired` |
+| 周报 | 宿主机/Hermes 按需调用 `/api/notify/weekly` → 组【待办+需买】→ QQ 邮箱 SMTP |
 
 ---
 
@@ -160,27 +208,28 @@ micloud
 | 路径 | 职责 |
 |------|------|
 | `app/main.py` | FastAPI 入口、lifespan 建库/加载设备、挂载路由与静态资源 |
-| `app/database.py` | aiosqlite 单例、`SCHEMA`（items / usage_logs / purchase_logs） |
-| `app/modules/devices.py` | 设备 YAML 加载、开关、命令、status、BLE 云控 |
+| `app/database.py` | aiosqlite 单例、`SCHEMA`（items / todos / ai_audit / device_preferences） |
+| `app/modules/devices.py` | 设备 YAML 加载、开关、命令、status、BLE 云控、展示隐藏 |
 | `app/modules/uptime.py` | Kuma SQLite 只读查询 + 缓存 |
-| `app/modules/items.py` | 日用品 CRUD、消耗/购买、`predict_item`、predictions |
+| `app/modules/items.py` | 日用品 CRUD、消耗/购买、EWMA + 安全库存预测、`predict_item`、predictions |
+| `app/modules/todos.py` | 重点待办 CRUD、提醒意图与 `/api/agent/todos/*` |
+| `app/modules/notify.py` | SMTP 周报组信与发送 |
+| `app/modules/ai_workbench.py` | LLM 解析、动作校验、审计 API |
+| `app/modules/ai_executor.py` | AI 白名单动作执行器 |
 | `app/xiaomi_login.py` | 小米登录（验证码）→ `data/xiaomi_cloud.json` |
 | `app/discover_devices.py` | 云端设备列表辅助脚本 |
 | `app/static/index.html` | 页面骨架（Tab） |
 | `app/static/style.css` | 米家浅色主题 |
-| `app/static/app.js` | 三 Tab 前端逻辑 |
+| `app/static/app.js` | 五 Tab 前端逻辑 |
 | `Dockerfile` / `docker-compose.yml` | 容器构建与运行 |
 
-### 规划中（DEVPLAN，实现时新增）
+### 后续按需
 
-| 路径（预估） | 职责 | 待办 |
+| 能力 | 职责 | 状态 |
 |--------------|------|------|
-| `app/modules/todos.py` | 重点待办 CRUD + `/api/agent/todos/*` | 8 |
-| `app/modules/notify.py` | Gmail 周报组信与发送 | 6 |
-| `app/modules/ai_workbench.py` | LLM parse、prompt、校验 | 7 |
-| `app/modules/ai_executor.py` | 白名单 `op` 执行写库 | 7 |
-| `app/database.py` 扩展 | `todos`、`ai_audit` 表 | 7/8 |
-| `app/static/*` | 「待办」「AI」Tab UI | 7/8 |
+| 设备隐藏/恢复 | 设备页展示偏好持久化 | DEVPLAN 3A |
+| 设备属性控制 | 灯光亮度等属性写入 | 按需，不默认开发 |
+| 粘贴导入设备 | 将第三方导出结果写入设备配置 | 推迟 |
 
 ---
 
@@ -281,16 +330,16 @@ BLE 无 IP 时需方式一补 DID。
 | `HOMEDASH_PORT` | `8088` | 对外端口 |
 | `XIAOMI_USERNAME` / `XIAOMI_PASSWORD` | - | 仅首次云端登录；成功后可删，凭据在 `data/xiaomi_cloud.json` |
 
-**规划中（实现对应功能时写入 `.env.example`）：**
+**已用或预留：**
 
 | 变量组 | 用途 |
 |--------|------|
-| `SMTP_*` / `NOTIFY_*` | Gmail 周报 |
+| `SMTP_*` / `NOTIFY_*` | QQ 邮箱 SMTP 周报 |
 | `LLM_*` / `AI_*` | AI 工作台 |
-| `AGENT_API_TOKEN` | home agent 调 `/api/agent/*` |
+| `AGENT_API_TOKEN` | home agent 调 `/api/agent/*`；为空仅适合内网 |
 | `HOMEDASH_PUBLIC_URL` | 邮件里的面板链接 |
 
-**切勿**把真实密码、token、App Password 写进仓库或公开文档。
+**切勿**把真实密码、token、SMTP 授权码写进仓库或公开文档。
 
 ---
 
@@ -300,9 +349,12 @@ BLE 无 IP 时需方式一补 DID。
 python -m app.modules.items     # 预测数学
 python -m app.modules.devices   # 命令映射 + 配置加载
 python -m app.modules.uptime    # 无 DB 不崩
+python -m app.modules.todos     # 待办提醒格式与时间解析
+python -m app.modules.notify    # 周报文本与收件人解析
+python -m app.modules.ai_workbench # AI 白名单校验
 ```
 
-规划模块上线后同样提供 `python -m app.modules.<name>` 自检（无 pytest）。
+各模块均提供 `python -m app.modules.<name>` 自检（无 pytest）。
 
 ---
 
@@ -313,7 +365,9 @@ python -m app.modules.uptime    # 无 DB 不崩
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/devices` | 设备列表（无内部 `_inst`） |
-| GET | `/api/devices/status` | online / power（best-effort） |
+| GET | `/api/devices?include_hidden=true` | 含隐藏设备的管理列表 |
+| PUT | `/api/devices/{name}/visibility` | 隐藏或恢复设备展示 |
+| GET | `/api/devices/status` | online / power / updated_at / error（best-effort） |
 | POST | `/api/devices/{name}/on` | 开 |
 | POST | `/api/devices/{name}/off` | 关 |
 | POST | `/api/devices/{name}/command` | 自定义命令（仅 WiFi） |
@@ -326,18 +380,18 @@ python -m app.modules.uptime    # 无 DB 不崩
 | POST | `/api/items/{id}/purchase` | 购买（加库存） |
 | GET | `/api/items/{id}/history` | 历史 |
 | GET | `/api/items/predictions` | 需买 / 充足汇总 |
+| GET | `/api/todos?status=open\|done\|all` | 重点待办列表 |
+| POST | `/api/todos` | 新建重点待办 |
+| GET / PUT / DELETE | `/api/todos/{id}` | 查看、编辑、删除重点待办 |
+| POST | `/api/todos/{id}/done`、`/reopen` | 完成或重新打开 |
+| GET | `/api/todos/summary` | 未完成、过期与优先事项摘要 |
+| GET / POST | `/api/agent/todos/due`、`/open` | agent 拉取到点或未完成待办 |
+| POST / PUT | `/api/agent/todos/*/remind-fired`、`/remind` | agent 回写提醒或修改提醒 |
+| GET / POST | `/api/notify/config`、`/test`、`/weekly` | SMTP 配置状态、试发、周报 |
+| POST | `/api/ai/parse`、`/apply` | AI 解析预览、确认写入 |
+| GET | `/api/ai/audit` | AI 写库审计记录 |
 
 静态页：`/`、`/app.js`、`/style.css`。
-
-### 规划中（规格见 DEVPLAN，路径可能微调）
-
-| 前缀 | 说明 |
-|------|------|
-| `/api/todos`、`/api/agent/todos/*` | 重点待办 + agent 提醒 |
-| `/api/notify/*` | Gmail 试发 / 周报 |
-| `/api/ai/parse`、`/api/ai/apply` | AI 工作台 |
-
----
 
 ## 项目结构
 
@@ -364,10 +418,10 @@ homedash/
 │   │   ├── devices.py        # ✅ 米家
 │   │   ├── uptime.py         # ✅ Kuma
 │   │   ├── items.py          # ✅ 日用品
-│   │   ├── todos.py          # ⬜ 规划
-│   │   ├── notify.py         # ⬜ 规划
-│   │   ├── ai_workbench.py   # ⬜ 规划
-│   │   └── ai_executor.py    # ⬜ 规划
+│   │   ├── todos.py          # ✅ 重点待办
+│   │   ├── notify.py         # ✅ SMTP 周报
+│   │   ├── ai_workbench.py   # ✅ AI 解析与审计
+│   │   └── ai_executor.py    # ✅ 白名单执行器
 │   └── static/
 │       ├── index.html
 │       ├── style.css         # 米家浅色

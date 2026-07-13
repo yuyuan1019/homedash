@@ -248,6 +248,11 @@ main {
   gap: 0.35rem;
   flex-wrap: wrap;
 }
+.device-error {
+  margin-top: 0.35rem;
+  font-size: 0.76rem;
+  color: var(--down);
+}
 
 /* iOS 风格开关 */
 .switch {
@@ -387,6 +392,75 @@ main {
 }
 .need-buy-group { box-shadow: 0 8px 24px rgba(255,90,90,0.08), var(--shadow); }
 .sufficient-group { box-shadow: 0 8px 24px rgba(46,204,113,0.06), var(--shadow); }
+
+/* 重点待办 */
+.todo-list {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0.25rem 0.85rem;
+}
+.todo-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 0.9rem 0.1rem;
+  border-bottom: 1px solid var(--line);
+}
+.todo-card:last-child { border-bottom: none; }
+.todo-card.overdue .todo-title { color: #c43b3b; }
+.todo-card.done { opacity: 0.65; }
+.todo-card.done .todo-title { text-decoration: line-through; }
+.todo-main { flex: 1; min-width: 0; }
+.todo-title { font-weight: 600; word-break: break-word; }
+.todo-meta, .todo-note {
+  margin-top: 0.22rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.todo-note { white-space: pre-wrap; }
+.todo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+.todo-channel-options {
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+}
+.todo-channel-options label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--text);
+  margin: 0;
+}
+.todo-channel-options input { width: auto; }
+
+/* 设备展示管理 */
+.device-manager-help { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.8rem; }
+.device-manager-list { border-top: 1px solid var(--line); }
+.device-manager-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.7rem 0.1rem;
+  border-bottom: 1px solid var(--line);
+}
+.device-manager-row span { word-break: break-word; }
+
+/* AI 工作台 */
+.ai-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.9rem; }
+.ai-reply { margin: 0.8rem 0; padding: 0.65rem 0.8rem; background: var(--accent-soft); border-radius: var(--radius-sm); color: #8a5200; }
+.ai-preview { margin-top: 0.9rem; border-top: 1px solid var(--line); }
+.ai-action { display: block; padding: 0.55rem 0.1rem; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
+.ai-action input { margin-right: 0.35rem; }
+.ai-results { margin-top: 0.8rem; padding: 0.7rem; overflow: auto; background: #f5f7fa; border-radius: var(--radius-sm); font-size: 0.78rem; }
 
 /* Modal */
 .modal {

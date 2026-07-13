@@ -1,7 +1,7 @@
 # HomeDash DEVPLAN（待办规格书）
 
 > ⬜ 本文档是**待办规格书**，不是已完成记录。  
-> 已完成基线以**代码**为准：items/devices/uptime 后端、三 Tab 前端（米家风格）、BLE Mesh 云端开关、Docker、设备 power 状态。  
+> 已完成基线以**代码**为准：items/devices/uptime/todos 后端、四 Tab 前端（米家风格）、BLE Mesh 云端开关、Docker、设备 power 状态。
 > **本文件中的增强项在落地前均视为未实现**；编码时勿把下文 API/文件名当成仓库里已有。
 
 ## AI 实现约束（所有待办通用）
@@ -24,9 +24,11 @@
 - 前端：`app/static/index.html`、`app/static/style.css`、`app/static/app.js`
 - 部署：`Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.env.example`
 - 设备状态：`GET /api/devices/status` 返回 `[{name, online, power}]`
-- 日用品预测（**现状**）：全历史均匀平均线性模型（见下方「现状 vs 目标」）
+- 日用品预测（**现状**）：EWMA + 安全库存、购买间隔与品类先验兜底（见下方「现状 vs 目标」）
 
-## 待办 0：日用品预测升级（EWMA + 安全库存）— **优先规格，尚未开发**
+## 待办 0：日用品预测升级（EWMA + 安全库存）— **已完成**
+
+**完成情况（2026-07-13）**：`app/modules/items.py` 已实现相邻 usage 区间的 EWMA、最低库存与到货缓冲安全库存、购买间隔中位数兜底、品类冷启动先验、`confidence` / `method` / `safety_stock` 输出；模块 `__main__` 覆盖算法与兼容字段自检。多条 usage 时最早记录仅作时间锚点，不按一天消耗计入 EWMA，避免少量历史造成速率虚高。
 
 **场景假设**：两口之家、约 120㎡ 固定住房、手动记账、自托管。  
 **目标**：少数据也能用、结果可解释、覆盖洗护/纸品/宠物/冷冻食品等多品类。  
@@ -34,14 +36,14 @@
 
 ### 0.1 现状 vs 目标
 
-| | 现状（代码已实现） | 目标（本待办，未实现） |
+| | 实现前 | 当前实现 |
 |--|------------------|----------------------|
-| 日消耗率 | 全历史 `总消耗 / 首末日跨度` | **EWMA**（近记录权重大） |
+| 日消耗率 | 全历史 `总消耗 / 首末日跨度` | ✅ **EWMA**（近记录权重大） |
 | 单条记录 | 跨度兜底 1 天 | 保留兜底；≥2 条再信 EWMA |
-| 需购买 | 仅 `days_until_empty < 7` | 天数阈值 **或** 库存 < 安全库存 |
-| 冷启动 | 无用量几乎不预测 | 品类先验 + `min_stock` |
-| 懒人模式 | 无 | 可选：购买间隔中位数兜底 |
-| 输出字段 | daily_rate / days / need_buy / suggested_qty | 同上 + `confidence` + `method` |
+| 需购买 | 仅 `days_until_empty < 7` | ✅ 天数阈值 **或** 库存 < 安全库存 |
+| 冷启动 | 无用量几乎不预测 | ✅ 品类先验 + `min_stock` |
+| 懒人模式 | 无 | ✅ 购买间隔中位数兜底 |
+| 输出字段 | daily_rate / days / need_buy / suggested_qty | ✅ 同上 + `confidence` + `method` + `safety_stock` |
 
 ### 0.2 推荐算法（实现时按此做）
 
@@ -51,12 +53,13 @@
 输入：usage_logs（按时间排序）、current_stock、today、可选 category / min_stock / purchase_logs
 
 1) 将相邻用量记录换成区间日速率：
-   r_i = amount_i / max(1, (date_i - date_{i-1}).days)
-   首条若无前序：r_0 = amount_0 / 1   # ponytail: 与现状单条兜底一致
+    r_i = amount_i / max(1, (date_i - date_{i-1}).days)
+    多条记录时首条仅作时间锚点；仅单条时 r_0 = amount_0 / 1
+    # ponytail: 避免未知跨度的首条记录抬高少样本 EWMA
 
 2) EWMA：
-   rate_0 = r_0
-   rate_t = α * r_t + (1-α) * rate_{t-1}
+    rate_0 = 第一个有效区间速率 r_1
+    rate_t = α * r_t + (1-α) * rate_{t-1}
    默认 α = 0.35（两口之家稳态消耗）
 
 3) 安全库存：
@@ -183,18 +186,18 @@
 
 **改动文件（预估）：**
 
-- `app/modules/items.py`：重写 `predict_item`；自检用例按新公式改
+- `app/modules/items.py`：✅ 已重写 `predict_item`；自检用例已按新公式改
 - （可选）`predict_item` 增加参数：`purchases`、`category`、`min_stock`
 - 前端：可展示 `confidence`（低/中/高）；无字段时不崩
 - 文档：完成后把本待办标完成，并同步 README / AGENTS「现状」描述
 
 **自检必须覆盖：**
 
-1. 多条用量 → EWMA rate 与全历史平均不同（证明权重生效）
-2. 库存 < 安全库存 → need_buy
-3. 无用量 + min_stock → 合理 need_buy / prior
-4. 冷冻食品脉冲消耗（近期高、早期低）→ 更跟近期
-5. 旧调用方字段仍存在（兼容）
+1. ✅ 多条用量 → EWMA rate 与全历史平均不同（证明权重生效）
+2. ✅ 库存 < 安全库存 → need_buy
+3. ✅ 无用量 + min_stock → 合理 need_buy / prior
+4. ✅ 冷冻食品脉冲消耗（近期高、早期低）→ 更跟近期
+5. ✅ 旧调用方字段仍存在（兼容）
 
 **明确不做（本期）：**
 
@@ -262,6 +265,40 @@ Content-Type: application/json
 
 `/api/devices/status` 在 power 之外按需返回亮度等 `props`；单台 3s 超时；单台失败不影响其他设备。
 
+## 待办 3A：设备展示管理与状态说明 — **已完成**
+
+**完成情况（2026-07-13）**：已新增 `device_preferences` 展示偏好表、设备隐藏/恢复 API 和设备页管理弹窗。隐藏状态持久化于 SQLite，不改 YAML；默认设备列表与状态刷新跳过隐藏设备。状态响应新增 `updated_at` 与脱敏 `error`，并已移除未实现的设备属性和粘贴导入假入口。
+
+**目标**：设备页保持现有开关控制，补充可解释的在线状态；用户可隐藏不想在面板展示的设备，并随时恢复。隐藏只影响 HomeDash 展示，绝不修改 `config/devices.yaml`、不删除设备凭据、不下发设备命令。
+
+### 3A.1 数据与接口
+
+- 在 SQLite 增加 `device_preferences(device_name PRIMARY KEY, hidden, updated_at)`，仅保存展示偏好。
+- `GET /api/devices` 默认只返回可见设备；`?include_hidden=true` 返回全部，并附 `hidden` 字段。
+- `PUT /api/devices/{name}/visibility` body：`{"hidden": true|false}`；名称不存在返回中文 404。
+- `GET /api/devices/status` 默认只查询可见设备；`?include_hidden=true` 才查询全部。
+- 状态结果保留 `name`、`online`、`power`，新增 `updated_at`；查询失败时新增简短中文 `error`，不得含 token、host、异常栈。
+- 隐藏不是权限控制：已有 on/off/command 接口行为不变。
+
+### 3A.2 前端
+
+- 设备页增加「管理设备」弹窗，列出全部 YAML 设备，可隐藏或恢复显示。
+- 设备卡片只显示可见设备；工具栏提示隐藏数量。
+- 移除尚未实现的亮度、色温、温度、模式等属性控件和“开发中”假入口；灯光及其他设备只保留当前开关控制。
+
+### 3A.3 验收
+
+1. 隐藏后默认设备列表和状态刷新均不出现该设备；`include_hidden=true` 仍可查到并标为 hidden。
+2. 恢复显示后设备重新出现；重启后隐藏偏好仍保留。
+3. `devices.yaml` 不被修改；隐藏设备的开关接口仍可用。
+4. 单台状态失败不影响其他设备，前端可显示状态获取失败提示。
+
+### 3A.4 明确不做
+
+- 不实现灯光亮度、色温和其他设备属性控制。
+- 不做粘贴导入设备，不写回 YAML。
+- 不做按房间排序、别名等额外设备元数据。
+
 ## 待办 4：粘贴导入米家设备（推迟）
 
 **状态**：先不做。当前手写 `config/devices.yaml` 足够。  
@@ -269,14 +306,16 @@ Content-Type: application/json
 
 ---
 
-## 待办 6：周报邮件提醒（库存/需购买 + **重点待办**）— **规格，尚未开发**
+## 待办 6：周报邮件提醒（库存/需购买 + **重点待办**）— **已完成**
+
+**完成情况（2026-07-13）**：已新增 `app/modules/notify.py` 与 `/api/notify/config`、`/test`、`/weekly`。周报通过 QQ 邮箱 SMTP 汇总重点待办和需购买日用品；465 端口走 SSL，其他端口走 STARTTLS；发送在 `asyncio.to_thread` 中运行。SMTP 凭据与两个收件人仅从 `.env` 读取，接口不返回授权码。
 
 **难度**：★☆☆☆☆ 简单  
-**目标**：每周自动发一封中文 Gmail，汇总：  
+**目标**：每周自动发一封中文 SMTP 邮件，汇总：
 1）日用品剩余 / 需要购买；  
 2）**家庭重点待办事项**（未完成的高优先级 to-do）。  
 **场景**：两口之家周末采购 + 家务/杂事提醒，一封邮件看完。  
-**邮件通道（已定）**：**Gmail SMTP**（App Password，不是谷歌登录密码）。
+**邮件通道（已定）**：**QQ 邮箱 SMTP**（授权码，不是 QQ 登录密码）。
 
 > **重点待办**的完整数据模型与页面见 **待办 8**。本待办负责「邮件怎么带上它们」；实现顺序建议 **先 8 再 6**，或同一次做：有 todos 表才能写进周报。
 
@@ -323,19 +362,19 @@ Content-Type: application/json
 - 日用品：现有 items + `predict_item`
 - 重点待办：`todos` 表（待办 8）
 
-### 6.3 Gmail 配置（`.env` / `.env.example`）
+### 6.3 QQ 邮箱 SMTP 配置（`.env` / `.env.example`）
 
-> 实现前用户需在 Google 账号开启两步验证，并生成 **应用专用密码**。  
+> 实现前用户需在 QQ 邮箱网页设置开启 SMTP，并生成 **授权码**。
 > **禁止**把真实密码写进仓库。
 
-| 变量 | Gmail 推荐值 | 说明 |
+| 变量 | QQ 邮箱推荐值 | 说明 |
 |------|--------------|------|
-| `SMTP_HOST` | `smtp.gmail.com` | 固定 |
-| `SMTP_PORT` | `587` | STARTTLS（推荐）；或 `465` SSL |
-| `SMTP_USER` | `you@gmail.com` | 完整 Gmail 地址 |
-| `SMTP_PASSWORD` | `xxxx xxxx xxxx xxxx` | **16 位 App Password** |
-| `SMTP_FROM` | `HomeDash <you@gmail.com>` | 发件显示名 |
-| `NOTIFY_TO` | `you@gmail.com,spouse@gmail.com` | 收件人 |
+| `SMTP_HOST` | `smtp.qq.com` | 固定 |
+| `SMTP_PORT` | `465` | SSL；也兼容 `587` STARTTLS |
+| `SMTP_USER` | `your-qq-number@qq.com` | 完整 QQ 邮箱地址 |
+| `SMTP_PASSWORD` | - | QQ 邮箱 SMTP 授权码 |
+| `SMTP_FROM` | `HomeDash <your-qq-number@qq.com>` | 发件显示名 |
+| `NOTIFY_TO` | `person-a@example.com,person-b@example.com` | 两位收件人，英文逗号分隔 |
 | `NOTIFY_CRON` | `0 18 * * 0` | 每周日 18:00 |
 | `NOTIFY_TZ` | `Asia/Shanghai` | |
 | `NOTIFY_ENABLED` | `true` | 总开关 |
@@ -343,16 +382,16 @@ Content-Type: application/json
 | `NOTIFY_TODO_LIMIT` | `20` | 邮件最多列几条重点待办 |
 | `HOMEDASH_PUBLIC_URL` | `http://192.168.x.x:8088` | 正文面板链接 |
 
-Gmail 注意：App Password；国内出网；家庭周报无需 Gmail API OAuth。
+QQ 邮箱注意：SMTP 授权码；国内出网；家庭周报无需 OAuth。
 
 ```env
-# --- 邮件周报（Gmail）---
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=you@gmail.com
-SMTP_PASSWORD=your-app-password
-SMTP_FROM=HomeDash <you@gmail.com>
-NOTIFY_TO=you@gmail.com
+# --- 邮件周报（QQ 邮箱 SMTP）---
+SMTP_HOST=smtp.qq.com
+SMTP_PORT=465
+SMTP_USER=your-qq-number@qq.com
+SMTP_PASSWORD=your-qq-smtp-authorization-code
+SMTP_FROM=HomeDash <your-qq-number@qq.com>
+NOTIFY_TO=person-a@example.com,person-b@example.com
 NOTIFY_ENABLED=false
 NOTIFY_CRON=0 18 * * 0
 NOTIFY_TZ=Asia/Shanghai
@@ -371,23 +410,25 @@ GET  /api/notify/config   → 脱敏：enabled / has_smtp / to_count / host
 
 ### 6.5 实现文件（预估）
 
-- `app/modules/notify.py`：组信（todos + items）+ SMTP
+- `app/modules/notify.py`：✅ 组信（todos + items）+ SMTP
 - 依赖待办 8 的查询函数，如 `list_open_todos(limit)`
-- `app/main.py` 挂载；（可选）调度
-- `.env.example`、README
+- `app/main.py`：✅ 挂载；定时调度由宿主机/Hermes cron 调 `/api/notify/weekly`
+- `.env.example`、README：✅ 已同步
 
 ### 6.6 明确不做（本期）
 
 - 不做每条待办单独每日邮件（周报合并一封）
-- 不做 QQ/163 向导、Gmail OAuth
+- 不做 QQ/163 登录向导、OAuth
 - 不做推送 App
 
 ---
 
-## 待办 8：重点待办事项（家庭 To-Do）— **规格，尚未开发**
+## 待办 8：重点待办事项（家庭 To-Do）— **已完成**
+
+**完成情况（2026-07-13）**：已新增 `todos` 表、`app/modules/todos.py` 面板 CRUD 与 `/api/agent/todos/*` 接口、第四个「重点待办」Tab、`AGENT_API_TOKEN` 配置模板。HomeDash 只提供待办查询、创建和回写接口，不主动推送、不内置调度；QQ/微信实际投递由外部 Hermes 或带 skill 的 AI 自行查询并完成。
 
 **难度**：★★☆☆☆  
-**目标**：记录家里**重点待办**（家务、维修、预约、账单等），面板可管理，并进入 **Gmail 周报**（待办 6）。  
+**目标**：记录家里**重点待办**（家务、维修、预约、账单等），面板可管理，并进入 **SMTP 周报**（待办 6）。
 **不是**软件开发任务列表，是「家里这两周必须盯的事」。
 
 ### 8.1 产品范围
@@ -555,7 +596,7 @@ GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
                                                        │
                        ┌───────────────────────────────┼────────────────┐
                        ▼                               ▼                ▼
-                    QQ 通道                          微信通道         Gmail 周报
+                    QQ 通道                          微信通道         SMTP 周报
                  (已有 qqbot)                    (预留/插件)       (待办 6 直发)
 ```
 
@@ -563,14 +604,14 @@ GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
 |------|--------|
 | 待办 CRUD、截止日、优先级 | **HomeDash** |
 | 提醒时间 `remind_at`、频道意图 | **HomeDash** 存；面板可编辑 |
-| 定时轮询 / cron「每 5～15 分钟拉 due」 | **home agent**（Hermes cron 等） |
+| 定时轮询 / cron「每 5～15 分钟拉 due」 | **外部 home agent / AI** 按自身策略决定是否查询 |
 | 发到 QQ / 微信 | **home agent** 调平台 API（不进 HomeDash 进程） |
 | 每周汇总邮件 | **HomeDash** SMTP（待办 6），与 IM 并行不互斥 |
 
 **Agent 侧推荐调度伪逻辑（文档给实现者，不写进镜像）：**
 
 ```text
-每 10 分钟:
+在 Hermes / AI 自身的定时任务或被唤醒时（非 HomeDash 主动推送）:
   GET /api/agent/todos/due?within_minutes=15
   for item in items:
     if "qq" in channels:  send_qq(item.message)
@@ -578,7 +619,7 @@ GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
     POST /api/agent/todos/{id}/remind-fired
 ```
 
-也可由 agent **创建时**直接登记 Hermes cron（把 `external_ref` 写回 todo），到期只发一条；due 轮询作兜底。
+也可由 agent **创建时**直接登记 Hermes cron（把 `external_ref` 写回 todo），到期只发一条；due 查询作兜底。HomeDash 不创建或主动执行 cron。
 
 ### 8.5 前端（第四 Tab）
 
@@ -596,12 +637,12 @@ AI 工作台一期即包含 `todo.create` / `todo.complete` / `todo.update` 等 
 
 ### 8.7 实现文件（预估）
 
-- `app/database.py`：`todos` 表（含 remind_*）
-- `app/modules/todos.py`：CRUD + summary + agent 路由 + 拼 `message`
-- `app/main.py`：挂载
-- `app/static/*`：第四 Tab
-- `.env.example`：`AGENT_API_TOKEN=`
-- README 增加「home agent 对接」小节（示例 curl）
+- `app/database.py`：✅ `todos` 表（含 remind_*）
+- `app/modules/todos.py`：✅ CRUD + summary + agent 路由 + 拼 `message`
+- `app/main.py`：✅ 挂载
+- `app/static/*`：✅ 第四 Tab
+- `.env.example`：✅ `AGENT_API_TOKEN=`
+- README：✅ 增加 home agent 对接说明
 - 可选：`docs/agent-todos.md` 给 Hermes 技能引用（若实现时需要再拆）
 
 ### 8.8 明确不做（本期）
@@ -633,7 +674,9 @@ curl -s -X POST http://127.0.0.1:8088/api/agent/todos/1/remind-fired \
 
 面板能完成 CRUD；due 在到点返回且 fired 后不再重复（once）。
 
-## 待办 7：AI 工作台（自然语言 → 结构化写库）— **规格，尚未开发**
+## 待办 7：AI 工作台（自然语言 → 结构化写库）— **已完成**
+
+**完成情况（2026-07-13）**：已新增 `ai_workbench.py`、`ai_executor.py`、`ai_audit` 表和第五个「AI 工作台」Tab。LLM 仅输出经服务端校验的白名单 JSON；`apply` 仅调用 items/todos 领域函数，禁止任意 SQL 与设备控制。LLM 未配置或 `AI_ENABLED=false` 时 API 优雅拒绝，不影响应用启动。
 
 **难度**：★★★★☆  
 **定位（已定）**：不是「仅语音记一笔库存」，而是面板上的 **AI 工作台**：用户用**打字或语音**下指令，大模型理解后生成**白名单结构化动作**，由 HomeDash **校验并写 SQLite**（库存、待办等）。  
@@ -892,12 +935,12 @@ CREATE TABLE IF NOT EXISTS ai_audit (
 
 ### 7.8 实现文件（预估）
 
-- `app/modules/ai_workbench.py`：prompt、LLM 调用、校验
-- `app/modules/ai_executor.py`：按 op 调 items/todos 内部函数
-- `app/database.py`：`ai_audit` 表
-- `app/static/*`：AI Tab 工作台 UI
-- `.env.example`、README「AI 工作台」
-- 自检：mock LLM JSON → apply 改库断言；非法 op 拒绝
+- `app/modules/ai_workbench.py`：✅ prompt、LLM 调用、校验
+- `app/modules/ai_executor.py`：✅ 按 op 调 items/todos 内部函数
+- `app/database.py`：✅ `ai_audit` 表
+- `app/static/*`：✅ AI Tab 工作台 UI
+- `.env.example`、README「AI 工作台」：✅ 已同步
+- 自检：✅ 非法 op 拒绝；Docker 验证 apply 改库与审计
 
 ### 7.9 明确不做（一期）
 
@@ -938,10 +981,6 @@ CREATE TABLE IF NOT EXISTS ai_audit (
 
 | 顺序 | 待办 | 原因 |
 |------|------|------|
-| 1 | 0 预测 EWMA | 大批量登记后收益最大 |
-| 2 | **8 重点待办 + agent 接口** | 周报与 QQ/微信提醒的数据源；`/api/agent/todos/due` |
-| 3 | **6 Gmail 周报**（库存 + 重点待办） | 依赖 8；通道 Gmail |
-| 4 | **7 AI 工作台**（自然语言写库存/待办） | 统一人话操作 DB；白名单 action，非裸 SQL |
-| 5 | home agent 侧 cron 调 due → QQ/微信 | HomeDash 接口就绪后配 |
-| 6 | 1 Docker 验收 / 2 灯光 props | 按需 |
+| 1 | Hermes / 带 skill 的 AI 按需查询 due → QQ/微信 | HomeDash 接口就绪后配，不属于 HomeDash 主动推送功能 |
+| 2 | 1 Docker 验收 / 2 灯光 props | 按需 |
 | 推迟 | 4 粘贴导入 | 仍推迟 |

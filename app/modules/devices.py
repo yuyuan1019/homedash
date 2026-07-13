@@ -2,14 +2,16 @@
 import asyncio
 import json
 import os
+from datetime import datetime
 from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from miio import Device
+from app.database import get_db
 
 load_dotenv()
 
@@ -177,7 +179,7 @@ def _val(result):
 
 def _query_power_sync(cfg: dict) -> dict:
     """查询单台设备 power；失败只影响本设备。"""
-    base = {"name": cfg["name"], "online": False, "power": None}
+    base = {"name": cfg["name"], "online": False, "power": None, "updated_at": None, "error": None}
     try:
         if _is_cloud_device(cfg):
             dev_type = cfg.get("type", "light")
@@ -186,8 +188,11 @@ def _query_power_sync(cfg: dict) -> dict:
         else:
             base["power"] = _val(_send(cfg, "get_prop", ["power"]))
         base["online"] = True
+        base["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    except HTTPException:
+        base["error"] = "状态获取失败"
     except Exception:
-        pass  # ponytail: status is best-effort; controls still report real errors.
+        base["error"] = "状态获取失败"
     return base
 
 
@@ -195,7 +200,7 @@ async def _query_power(cfg: dict) -> dict:
     try:
         return await asyncio.wait_for(asyncio.to_thread(_query_power_sync, cfg), timeout=3)
     except Exception:
-        return {"name": cfg["name"], "online": False, "power": None}
+        return {"name": cfg["name"], "online": False, "power": None, "updated_at": None, "error": "状态获取超时"}
 
 
 # ============ API 端点 ============
@@ -206,22 +211,57 @@ class CommandIn(BaseModel):
     params: list = []
 
 
+class VisibilityIn(BaseModel):
+    hidden: bool
+
+
+async def _hidden_names(db) -> set[str]:
+    cur = await db.execute("SELECT device_name FROM device_preferences WHERE hidden=1")
+    return {row["device_name"] for row in await cur.fetchall()}
+
+
+async def _devices_with_visibility(db, include_hidden: bool) -> list[dict]:
+    hidden_names = await _hidden_names(db)
+    return _serialize_devices(hidden_names, include_hidden)
+
+
+def _serialize_devices(hidden_names: set[str], include_hidden: bool) -> list[dict]:
+    return [
+        {**{key: value for key, value in cfg.items() if not key.startswith("_")}, "hidden": cfg["name"] in hidden_names}
+        for cfg in _devices.values()
+        if include_hidden or cfg["name"] not in hidden_names
+    ]
+
+
 @router.on_event("startup")
 async def _startup() -> None:
     await asyncio.to_thread(load_devices)
 
 
 @router.get("/devices")
-async def list_devices():
+async def list_devices(include_hidden: bool = False, db=Depends(get_db)):
     """设备列表 + 配置（不查状态，多设备时太慢）。"""
-    return [{k: v for k, v in d.items() if not k.startswith("_")}
-            for d in _devices.values()]
+    return await _devices_with_visibility(db, include_hidden)
 
 
 @router.get("/devices/status")
-async def device_status():
+async def device_status(include_hidden: bool = False, db=Depends(get_db)):
     """所有设备在线/电源状态；单台失败不影响其他设备。"""
-    return await asyncio.gather(*[_query_power(cfg) for cfg in _devices.values()])
+    hidden_names = await _hidden_names(db)
+    configs = [cfg for cfg in _devices.values() if include_hidden or cfg["name"] not in hidden_names]
+    return await asyncio.gather(*[_query_power(cfg) for cfg in configs])
+
+
+@router.put("/devices/{name}/visibility")
+async def set_visibility(name: str, payload: VisibilityIn, db=Depends(get_db)):
+    _get(name)
+    await db.execute(
+        "INSERT INTO device_preferences(device_name,hidden,updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(device_name) DO UPDATE SET hidden=excluded.hidden, updated_at=excluded.updated_at",
+        (name, int(payload.hidden), datetime.now().isoformat(timespec="seconds")),
+    )
+    await db.commit()
+    return {"name": name, "hidden": payload.hidden}
 
 
 @router.post("/devices/{name}/on")
@@ -254,6 +294,13 @@ if __name__ == "__main__":
     assert _DEFAULT[0] == "set_power"
     assert _val(["on"]) == "on"
     assert _val({"result": [{"value": True}]}) is True
+    original_devices = dict(_devices)
+    _devices.clear()
+    _devices.update({"可见": {"name": "可见"}, "隐藏": {"name": "隐藏"}})
+    assert [item["name"] for item in _serialize_devices({"隐藏"}, False)] == ["可见"]
+    assert _serialize_devices({"隐藏"}, True)[1]["hidden"] is True
+    _devices.clear()
+    _devices.update(original_devices)
     load_devices()  # 无文件不报错，有文件正常加载
     # ponytail: 有配置文件时验证加载正确，无配置文件时验证空列表
     if os.path.isfile(DEVICES_PATH):

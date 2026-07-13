@@ -6,7 +6,7 @@
 
 家庭自托管面板。  
 **已实现模块**：米家设备（WiFi + BLE Mesh）、Uptime Kuma、日用品库存/预测、Docker。  
-**规划模块**（仅规格，见 `DEVPLAN.md`）：重点待办 + agent 接口、Gmail 周报、AI 工作台、EWMA 预测。  
+**规划模块**（仅规格，见 `DEVPLAN.md`）：无；当前待办均按代码状态为准。
 中文 UI 与注释。公开说明以 `README.md` 为准。
 
 ---
@@ -47,7 +47,7 @@
    - `DEVPLAN.md` 待办状态或验收  
    - 本文模块地图若有新文件  
    - `.env.example` 若有新配置项（只写占位符）  
-4. **无密钥入库**：diff 中无 token/密码/App Password/LLM Key  
+4. **无密钥入库**：diff 中无 token/密码/SMTP 授权码/LLM Key
 5. **中文**：用户可见文案、注释、toast、邮件正文用中文  
 6. **不扩大范围**：无无关格式化大扫除、无擅自升级依赖大版本  
 
@@ -96,7 +96,7 @@
 2. 先实现 **验收命令/用例** 中列出的路径，再考虑可选增强  
 3. 「明确不做」整节 **禁止实现**（如 AI 一期不准控灯、不准裸 SQL）  
 4. 做完后在 DEVPLAN 该待办顶部把状态改为已完成，或移入「已完成基线」，并改 README 状态表  
-5. 需要用户密钥才能测的（Gmail/LLM）：代码 + dry-run/自检要能在无密钥时**优雅跳过**，不能 import 即崩  
+5. 需要用户密钥才能测的（SMTP/LLM）：代码 + dry-run/自检要能在无密钥时**优雅跳过**，不能 import 即崩
 
 ### 0.9 与「面板内 AI 工作台」的区分
 
@@ -110,7 +110,7 @@
 
 ### 0.10 输出给用户的说明习惯
 
-- 用中文简述：改了什么、怎么验证、还缺什么（如需用户填 App Password）  
+- 用中文简述：改了什么、怎么验证、还缺什么（如需用户填 SMTP 授权码）
 - 不要谎称「已测试邮件/LLM」若实际无密钥未联调  
 - 不要把「写了规格」说成「功能已上线」  
 
@@ -123,7 +123,7 @@
 - 前端：单页 HTML + vanilla JS，**无构建 / 无前端框架**。
 - 依赖见 `requirements.txt`，不轻易新增。规划：邮件 stdlib smtplib；AI 用 httpx；**禁止**默认镜像内置本地大模型。
 - 产品 AI（待办 7）：白名单 actions 写库，**禁止 LLM 直接 SQL**。
-- IM（QQ/微信）：HomeDash **不实现**协议；home agent 调 `/api/agent/todos/*`。
+- IM（QQ/微信）：HomeDash **不实现**协议、不主动推送、不内置调度；Hermes 或带 skill 的 AI 按需调 `/api/agent/todos/*`。
 
 ## 开发命令
 
@@ -148,22 +148,22 @@ python -m app.modules.uptime
 
 | 模块文件 | 状态 | 职责 |
 |----------|------|------|
-| `app/modules/devices.py` | ✅ | 米家开关/命令/status/云控 |
+| `app/modules/devices.py` | ✅ | 米家开关/命令/status/云控/展示隐藏 |
 | `app/modules/uptime.py` | ✅ | Kuma 只读 + 缓存 |
-| `app/modules/items.py` | ✅ | 日用品 + 线性预测 |
-| `app/modules/todos.py` | ⬜ | 重点待办 + agent API |
-| `app/modules/notify.py` | ⬜ | Gmail 周报 |
-| `app/modules/ai_workbench.py` | ⬜ | LLM parse |
-| `app/modules/ai_executor.py` | ⬜ | 白名单写库 |
+| `app/modules/items.py` | ✅ | 日用品 + EWMA / 安全库存预测 |
+| `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API |
+| `app/modules/notify.py` | ✅ | SMTP 周报（库存 + 重点待办） |
+| `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、审计 |
+| `app/modules/ai_executor.py` | ✅ | 白名单写库 |
 | `app/database.py` | ✅ | 单例 DB；规划扩 todos/ai_audit |
-| `app/static/*` | ✅ 三 Tab | 规划加「待办」「AI」 |
+| `app/static/*` | ✅ 四 Tab | 米家浅色：设备、监控、日用品、重点待办；规划加「AI」 |
 
 ## 架构要点（非看文件不可知）
 
 - **DB 单例**：`_db` 全局；不要 per-request 新连接玩法。  
 - **库存方向**：`/usage` 减，`/purchase` 加。  
-- **predict_item**：现状全历史平均；目标 EWMA 见 DEVPLAN 0（未实现）。  
-- **devices**：`_POWER_CMDS`；`_inst` 不下发；BLE `_cloud_miot_*`；双重 startup 加载无害。  
+- **predict_item**：相邻 usage 区间 EWMA；安全库存取 `max(min_stock, rate * LEAD_DAYS)`；无/少 usage 时依次走购买间隔、品类先验、最低库存兜底。
+- **devices**：`_POWER_CMDS`；`_inst` 不下发；BLE `_cloud_miot_*`；展示隐藏仅存 `device_preferences`，不改 YAML；双重 startup 加载无害。
 - **uptime**：`mode=ro`，60s 缓存。  
 - **文档一致性**：同一 API/状态改一处必须改 README + DEVPLAN + 本文相关句。
 
@@ -176,8 +176,8 @@ python -m app.modules.uptime
 
 ## 当前阶段
 
-- ✅ Phase 1–3 + status + Docker + 米家浅色三 Tab  
-- ⬜ DEVPLAN：0 EWMA · 8 待办+agent · 6 Gmail · 7 AI 工作台  
+- ✅ Phase 1–3 + status + Docker + 米家浅色五 Tab + EWMA 预测 + 重点待办 + SMTP 周报 + AI 工作台 + 设备展示管理
+- ⬜ DEVPLAN：无未完成核心待办
 - 以**代码**与 **README 状态表**为准；DESIGN 仅作设计背景  
 
 ## 代码风格

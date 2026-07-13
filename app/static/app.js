@@ -1,12 +1,11 @@
-// HomeDash 前端：vanilla JS，单页三 Tab
+// HomeDash 前端：vanilla JS，单页家庭管理 Tab
 
 const API = {
   devices: '/api/devices',
   deviceStatus: '/api/devices/status',
   deviceOn: (name) => `/api/devices/${encodeURIComponent(name)}/on`,
   deviceOff: (name) => `/api/devices/${encodeURIComponent(name)}/off`,
-  deviceProps: (name) => `/api/devices/${encodeURIComponent(name)}/props`,
-  deviceImport: '/api/devices/import',
+  deviceVisibility: (name) => `/api/devices/${encodeURIComponent(name)}/visibility`,
   uptime: '/api/uptime/status',
   items: '/api/items',
   item: (id) => `/api/items/${id}`,
@@ -14,6 +13,12 @@ const API = {
   itemPurchase: (id) => `/api/items/${id}/purchase`,
   itemHistory: (id) => `/api/items/${id}/history`,
   predictions: '/api/items/predictions',
+  todos: (status = 'open') => `/api/todos?status=${status}`,
+  todo: (id) => `/api/todos/${id}`,
+  todoDone: (id) => `/api/todos/${id}/done`,
+  todoReopen: (id) => `/api/todos/${id}/reopen`,
+  aiParse: '/api/ai/parse',
+  aiApply: '/api/ai/apply',
 };
 
 const TYPE_GROUPS = [
@@ -32,25 +37,13 @@ const TYPE_GROUPS = [
 
 const TYPE_FALLBACK = { key: 'other', label: '其他', icon: '📦' };
 
-const AC_MODES = {
-  auto: '自动',
-  cool: '制冷',
-  heat: '加热',
-  fan: '送风',
-  dehumidify: '除湿',
-};
-
-const PURIFIER_MODES = {
-  auto: '自动',
-  silent: '静音',
-  favorite: '最爱',
-  idle: '待机',
-};
-
 let currentTab = 'devices';
 let devicesData = [];
 let deviceStatusMap = {}; // name -> status
 let autoRefreshTimer = null;
+let todoStatus = 'open';
+let aiActions = [];
+let aiConfidence = 'low';
 
 // ============ 工具函数 ============
 
@@ -117,6 +110,8 @@ function switchTab(tab) {
   if (tab === 'devices') loadDevices();
   if (tab === 'uptime') loadUptime();
   if (tab === 'items') loadItems();
+  if (tab === 'todos') loadTodos();
+  if (tab === 'ai') renderAiWorkbench();
 }
 
 function initTabs() {
@@ -159,60 +154,6 @@ async function toggleDevice(name, turnOn, inputEl) {
   }
 }
 
-async function setDeviceProp(name, prop, value) {
-  const { ok, data } = await fetchJSON(API.deviceProps(name), {
-    method: 'PUT',
-    body: JSON.stringify({ [prop]: value }),
-  });
-  if (ok) {
-    toast(`${name} ${prop} 已设为 ${value}`, 'success');
-  } else if (data?.detail === 'Not Found' || data?.detail?.includes('不支持')) {
-    toast('属性控制功能开发中', 'info');
-  } else {
-    toast(data?.detail || '设置失败', 'error');
-  }
-}
-
-function renderDeviceProps(name, type, props) {
-  const t = String(type).toLowerCase();
-  if (t === 'light') {
-    const b = props?.brightness ?? 50;
-    const c = props?.color_temp ?? 4000;
-    return `
-      <div class="props-row">
-        <label class="prop">亮度 <input type="range" min="1" max="100" value="${b}" data-prop="brightness" data-name="${name}"> <span>${b}%</span></label>
-        <label class="prop">色温 <input type="range" min="2700" max="6500" step="100" value="${c}" data-prop="color_temp" data-name="${name}"> <span>${c}K</span></label>
-      </div>`;
-  }
-  if (t === 'airconditioner') {
-    const temp = props?.temperature ?? 26;
-    const mode = props?.mode ?? 'auto';
-    return `
-      <div class="props-row">
-        <label class="prop">温度 <input type="range" min="16" max="30" value="${temp}" data-prop="temperature" data-name="${name}"> <span>${temp}°C</span></label>
-        <label class="prop">模式
-          <select data-prop="mode" data-name="${name}">
-            ${Object.entries(AC_MODES).map(([k, v]) => `<option value="${k}" ${mode === k ? 'selected' : ''}>${v}</option>`).join('')}
-          </select>
-        </label>
-      </div>`;
-  }
-  if (t === 'airpurifier') {
-    const level = props?.level ?? 1;
-    const mode = props?.mode ?? 'auto';
-    return `
-      <div class="props-row">
-        <label class="prop">档位 <input type="range" min="1" max="3" value="${level}" data-prop="level" data-name="${name}"> <span>${level}</span></label>
-        <label class="prop">模式
-          <select data-prop="mode" data-name="${name}">
-            ${Object.entries(PURIFIER_MODES).map(([k, v]) => `<option value="${k}" ${mode === k ? 'selected' : ''}>${v}</option>`).join('')}
-          </select>
-        </label>
-      </div>`;
-  }
-  return '';
-}
-
 function isPowerOn(power) {
   return power === true || power === 'on' || power === 1 || power === '1' || power === 'true';
 }
@@ -233,13 +174,11 @@ function renderDeviceCard(dev) {
     online === false ? 'offline' : '',
   ].filter(Boolean).join(' ');
 
-  // 属性控件：仅在线且非云端时展示（props 后端仍可能 404，前端已降级）
-  const propsHtml = (!isCloud && online) ? renderDeviceProps(dev.name, dev.type, status?.props || {}) : '';
-  // 双列时属性会撑高，有 props 的卡占满一行
-  const spanStyle = propsHtml ? ' style="grid-column: 1 / -1;"' : '';
+  const updated = status?.updated_at ? ` · 更新 ${status.updated_at.slice(11, 16)}` : '';
+  const error = status?.error ? `<div class="device-error">${status.error}</div>` : '';
 
   return `
-    <div class="${tileClass}" data-name="${dev.name}"${spanStyle}>
+    <div class="${tileClass}" data-name="${dev.name}">
       <div class="device-tile-top">
         <div class="device-icon ${powerOn ? 'on' : ''}">${getDeviceEmoji(dev.type)}</div>
         <label class="switch" title="${disabled ? '不可控' : (powerOn ? '关闭' : '开启')}">
@@ -252,10 +191,10 @@ function renderDeviceCard(dev) {
         <div class="device-name">${dev.name}</div>
         <div class="device-meta">
           <span class="status-dot ${online === true ? 'up' : (online === false ? 'down' : 'unknown')}"></span>
-          ${statusText}
+          ${statusText}${updated}
           ${badge}
         </div>
-        ${propsHtml}
+        ${error}
       </div>
     </div>`;
 }
@@ -265,12 +204,12 @@ function renderDevices() {
   if (!devicesData.length) {
     container.innerHTML = `
       <div class="toolbar">
-        <button class="btn" id="import-btn">📥 粘贴导入</button>
+        <button class="btn" id="manage-devices-btn">管理设备</button>
       </div>
       <div class="empty-state">
-        未配置设备，请点击「粘贴导入」或编辑 config/devices.yaml
+        暂无可见设备，请在「管理设备」中恢复，或编辑 config/devices.yaml
       </div>`;
-    bindImportBtn();
+    bindDeviceManager();
     return;
   }
 
@@ -288,7 +227,7 @@ function renderDevices() {
 
   let html = `
     <div class="toolbar">
-      <button class="btn" id="import-btn">📥 粘贴导入</button>
+      <button class="btn" id="manage-devices-btn">管理设备</button>
       <button class="btn" id="refresh-status-btn">刷新状态</button>
     </div>`;
 
@@ -305,7 +244,7 @@ function renderDevices() {
 
   container.innerHTML = html;
   bindDeviceEvents();
-  bindImportBtn();
+  bindDeviceManager();
   document.getElementById('refresh-status-btn')?.addEventListener('click', refreshDeviceStatus);
 }
 
@@ -317,28 +256,10 @@ function bindDeviceEvents() {
     });
   });
 
-  document.querySelectorAll('#tab-devices input[type="range"]').forEach((input) => {
-    input.addEventListener('input', (e) => {
-      const label = e.target.parentElement.querySelector('span');
-      let suffix = '%';
-      if (e.target.dataset.prop === 'color_temp') suffix = 'K';
-      if (e.target.dataset.prop === 'temperature') suffix = '°C';
-      label.textContent = e.target.value + suffix;
-    });
-    input.addEventListener('change', (e) => {
-      setDeviceProp(e.target.dataset.name, e.target.dataset.prop, parseInt(e.target.value, 10));
-    });
-  });
-
-  document.querySelectorAll('#tab-devices select[data-prop]').forEach((sel) => {
-    sel.addEventListener('change', (e) => {
-      setDeviceProp(e.target.dataset.name, e.target.dataset.prop, e.target.value);
-    });
-  });
 }
 
-function bindImportBtn() {
-  document.getElementById('import-btn')?.addEventListener('click', showImportModal);
+function bindDeviceManager() {
+  document.getElementById('manage-devices-btn')?.addEventListener('click', showDeviceManager);
 }
 
 async function refreshDeviceStatus() {
@@ -383,61 +304,26 @@ async function loadDevices() {
   renderDevices();
 }
 
-// ============ 设备导入 Modal ============
-
-function showImportModal() {
+async function showDeviceManager() {
+  const { ok, data } = await fetchJSON(`${API.devices}?include_hidden=true`);
+  if (!ok) { toast(data?.detail || '设备列表加载失败', 'error'); return; }
   showModal(`
     <div class="modal-content">
-      <div class="modal-header">
-        <div class="modal-title">📥 粘贴导入米家设备</div>
-        <button class="close-btn">&times;</button>
-      </div>
-      <p style="font-size:0.85rem;color:var(--muted);margin-bottom:0.8rem;">
-        粘贴 Xiaomi Cloud Tokens Extractor 的输出。自动过滤 BLE 设备和子设备，只导入有 IP 的 WiFi 设备。
-      </p>
-      <div class="form-group">
-        <textarea id="import-raw" placeholder="将 token_extractor 的输出粘贴到此处..."></textarea>
-      </div>
-      <div class="form-actions">
-        <button class="btn modal-cancel">取消</button>
-        <button class="btn btn-primary" id="confirm-import">导入</button>
-      </div>
+      <div class="modal-header"><div class="modal-title">管理设备展示</div><button class="close-btn">&times;</button></div>
+      <p class="device-manager-help">隐藏只影响 HomeDash 页面，不会删除设备或修改配置。</p>
+      <div class="device-manager-list">${(data || []).map((device) => `
+        <div class="device-manager-row"><span>${device.name}</span><button class="btn btn-small device-visibility" data-name="${device.name}" data-hidden="${device.hidden}">${device.hidden ? '恢复显示' : '隐藏'}</button></div>
+      `).join('') || '<div class="empty-state">未配置设备</div>'}</div>
     </div>`);
   bindModalClose();
-  document.getElementById('confirm-import').addEventListener('click', doImport);
+  document.querySelectorAll('.device-visibility').forEach((button) => button.addEventListener('click', () => setDeviceVisibility(button.dataset.name, button.dataset.hidden !== 'true')));
 }
 
-async function doImport() {
-  const raw = document.getElementById('import-raw').value.trim();
-  if (!raw) { toast('请先粘贴内容', 'error'); return; }
-  const btn = document.getElementById('confirm-import');
-  btn.disabled = true;
-  const { ok, status, data } = await fetchJSON(API.deviceImport, {
-    method: 'POST',
-    body: JSON.stringify({ raw }),
-  });
-  btn.disabled = false;
-  if (status === 404) {
-    toast('粘贴导入功能开发中', 'info');
-    return;
-  }
-  if (!ok) {
-    toast(data?.detail || '导入失败', 'error');
-    return;
-  }
-  const skipped = (data.skipped_list || []).map((s) => `<li>${s.name || '未知设备'}：${s.reason || '未知原因'}</li>`).join('');
+async function setDeviceVisibility(name, hidden) {
+  const { ok, data } = await fetchJSON(API.deviceVisibility(name), { method: 'PUT', body: JSON.stringify({ hidden }) });
+  if (!ok) { toast(data?.detail || '更新设备展示失败', 'error'); return; }
+  toast(hidden ? `${name} 已隐藏` : `${name} 已恢复显示`, 'success');
   closeModal();
-  showModal(`
-    <div class="modal-content">
-      <div class="modal-header">
-        <div class="modal-title">导入结果</div>
-        <button class="close-btn">&times;</button>
-      </div>
-      <p>导入 ${data.imported || 0} 台，跳过 ${data.skipped || 0} 台</p>
-      ${skipped ? `<details style="margin-top:0.8rem;"><summary>查看跳过列表</summary><ul style="font-size:0.85rem;color:var(--muted);">${skipped}</ul></details>` : ''}
-      <div class="form-actions"><button class="btn modal-cancel">关闭</button></div>
-    </div>`);
-  bindModalClose();
   loadDevices();
 }
 
@@ -758,6 +644,243 @@ async function showShoppingList() {
   });
 }
 
+// ============ 重点待办 Tab ============
+
+function todoPriorityLabel(priority) {
+  return { high: '高', medium: '中', low: '低' }[priority] || '中';
+}
+
+function todoPriorityBadge(priority) {
+  const cls = { high: 'badge-danger', medium: 'badge-warn', low: 'badge-ok' }[priority] || 'badge-warn';
+  return `<span class="badge ${cls}">${todoPriorityLabel(priority)}</span>`;
+}
+
+function renderTodoCard(todo) {
+  const reminder = todo.remind_at ? `提醒 ${fmtDate(todo.remind_at)} ${todo.remind_at.slice(11, 16)}` : '';
+  const due = todo.due_date ? `截止 ${todo.due_date}` : '未设截止日';
+  const meta = [due, todo.assignee, reminder].filter(Boolean).join(' · ');
+  const action = todo.status === 'done'
+    ? `<button class="btn btn-small todo-reopen" data-id="${todo.id}">重新打开</button>`
+    : `<button class="btn btn-small todo-done" data-id="${todo.id}">完成</button>`;
+  return `
+    <div class="todo-card ${todo.status === 'done' ? 'done' : ''} ${todo.overdue ? 'overdue' : ''}" data-id="${todo.id}">
+      <div class="todo-main">
+        <div class="todo-title">${todo.title} ${todoPriorityBadge(todo.priority)} ${todo.overdue ? '<span class="badge badge-danger">已过期</span>' : ''}</div>
+        <div class="todo-meta">${meta}</div>
+        ${todo.note ? `<div class="todo-note">${todo.note}</div>` : ''}
+      </div>
+      <div class="todo-actions">
+        ${action}
+        <button class="btn btn-small todo-edit" data-id="${todo.id}">编辑</button>
+      </div>
+    </div>`;
+}
+
+function renderTodos(todos) {
+  const container = document.getElementById('tab-todos');
+  const title = todoStatus === 'open' ? '暂无未完成重点待办' : '暂无已完成重点待办';
+  container.innerHTML = `
+    <div class="toolbar">
+      <button class="btn btn-primary" id="add-todo-btn">+ 添加待办</button>
+      <button class="btn ${todoStatus === 'open' ? 'btn-primary' : ''}" id="show-open-todos">未完成</button>
+      <button class="btn ${todoStatus === 'done' ? 'btn-primary' : ''}" id="show-done-todos">已完成</button>
+    </div>
+    ${todos.length ? `<div class="todo-list">${todos.map(renderTodoCard).join('')}</div>` : `<div class="empty-state">${title}</div>`}`;
+  document.getElementById('add-todo-btn').addEventListener('click', () => showTodoForm());
+  document.getElementById('show-open-todos').addEventListener('click', () => {
+    todoStatus = 'open';
+    loadTodos();
+  });
+  document.getElementById('show-done-todos').addEventListener('click', () => {
+    todoStatus = 'done';
+    loadTodos();
+  });
+  document.querySelectorAll('.todo-done').forEach((button) => {
+    button.addEventListener('click', () => setTodoStatus(Number(button.dataset.id), true));
+  });
+  document.querySelectorAll('.todo-reopen').forEach((button) => {
+    button.addEventListener('click', () => setTodoStatus(Number(button.dataset.id), false));
+  });
+  document.querySelectorAll('.todo-edit').forEach((button) => {
+    button.addEventListener('click', () => showTodoDetail(Number(button.dataset.id)));
+  });
+}
+
+async function loadTodos() {
+  const container = document.getElementById('tab-todos');
+  container.innerHTML = '<div class="loading">加载重点待办中...</div>';
+  const { ok, data } = await fetchJSON(API.todos(todoStatus));
+  if (!ok) {
+    container.innerHTML = `<div class="empty-state">待办加载失败：${data?.detail || '未知错误'}</div>`;
+    return;
+  }
+  renderTodos(data || []);
+}
+
+function datetimeLocalValue(value) {
+  return value ? value.slice(0, 16) : '';
+}
+
+function showTodoForm(todo = null) {
+  const isEdit = !!todo;
+  const channels = todo?.remind_channels || [];
+  showModal(`
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">${isEdit ? '编辑重点待办' : '添加重点待办'}</div>
+        <button class="close-btn">&times;</button>
+      </div>
+      <div class="form-group"><label>标题 *</label><input id="todo-title" value="${todo?.title || ''}"></div>
+      <div class="form-group"><label>备注</label><textarea id="todo-note">${todo?.note || ''}</textarea></div>
+      <div class="form-group"><label>优先级</label>
+        <select id="todo-priority">
+          ${['high', 'medium', 'low'].map((value) => `<option value="${value}" ${(todo?.priority || 'medium') === value ? 'selected' : ''}>${todoPriorityLabel(value)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label>截止日期</label><input type="date" id="todo-due-date" value="${todo?.due_date || ''}"></div>
+      <div class="form-group"><label>负责人</label><input id="todo-assignee" value="${todo?.assignee || ''}" placeholder="例如：我、配偶、双方"></div>
+      <div class="form-group"><label>提醒时间</label><input type="datetime-local" id="todo-remind-at" value="${datetimeLocalValue(todo?.remind_at)}"></div>
+      <div class="form-group"><label>提醒频道</label>
+        <div class="todo-channel-options">
+          <label><input type="checkbox" name="todo-channel" value="qq" ${channels.includes('qq') ? 'checked' : ''}> QQ</label>
+          <label><input type="checkbox" name="todo-channel" value="wechat" ${channels.includes('wechat') ? 'checked' : ''}> 微信</label>
+          <label><input type="checkbox" name="todo-channel" value="email" ${channels.includes('email') ? 'checked' : ''}> 仅邮件周报</label>
+        </div>
+      </div>
+      <div class="form-group"><label>重复提醒</label>
+        <select id="todo-remind-repeat">
+          ${[['none', '不重复'], ['once', '一次'], ['daily', '每天'], ['weekly', '每周']].map(([value, label]) => `<option value="${value}" ${(todo?.remind_repeat || 'none') === value ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-actions">
+        ${isEdit ? '<button class="btn" id="delete-todo-btn" style="color:var(--down);">删除</button>' : ''}
+        <button class="btn modal-cancel">取消</button>
+        <button class="btn btn-primary" id="save-todo">${isEdit ? '保存' : '添加'}</button>
+      </div>
+    </div>`);
+  bindModalClose();
+  document.getElementById('save-todo').addEventListener('click', () => saveTodo(todo?.id));
+  document.getElementById('delete-todo-btn')?.addEventListener('click', () => deleteTodo(todo.id));
+}
+
+function todoPayload() {
+  const channels = [...document.querySelectorAll('input[name="todo-channel"]:checked')].map((input) => input.value);
+  return {
+    title: document.getElementById('todo-title').value.trim(),
+    note: document.getElementById('todo-note').value.trim() || null,
+    priority: document.getElementById('todo-priority').value,
+    due_date: document.getElementById('todo-due-date').value || null,
+    assignee: document.getElementById('todo-assignee').value.trim() || null,
+    remind_at: document.getElementById('todo-remind-at').value || null,
+    remind_channels: channels,
+    remind_repeat: document.getElementById('todo-remind-repeat').value,
+  };
+}
+
+async function saveTodo(id) {
+  const payload = todoPayload();
+  if (!payload.title) { toast('标题必填', 'error'); return; }
+  const { ok, data } = await fetchJSON(id ? API.todo(id) : API.todos(), {
+    method: id ? 'PUT' : 'POST',
+    body: JSON.stringify(payload),
+  });
+  if (!ok) { toast(data?.detail || '保存失败', 'error'); return; }
+  toast(id ? '待办已保存' : '待办已添加', 'success');
+  closeModal();
+  loadTodos();
+}
+
+async function showTodoDetail(id) {
+  const { ok, data } = await fetchJSON(API.todo(id));
+  if (!ok) { toast(data?.detail || '待办不存在', 'error'); return; }
+  showTodoForm(data);
+}
+
+async function setTodoStatus(id, done) {
+  const { ok, data } = await fetchJSON(done ? API.todoDone(id) : API.todoReopen(id), { method: 'POST' });
+  if (!ok) { toast(data?.detail || '操作失败', 'error'); return; }
+  toast(done ? '待办已完成' : '待办已重新打开', 'success');
+  loadTodos();
+}
+
+async function deleteTodo(id) {
+  if (!confirm('确定删除该待办？')) return;
+  const { ok, data } = await fetchJSON(API.todo(id), { method: 'DELETE' });
+  if (!ok) { toast(data?.detail || '删除失败', 'error'); return; }
+  toast('待办已删除', 'success');
+  closeModal();
+  loadTodos();
+}
+
+// ============ AI 工作台 Tab ============
+
+function actionLabel(action) {
+  const labels = {
+    'item.purchase': `购买 ${action.amount} ${action.unit || ''} ${action.name || ''}`,
+    'item.usage': `消耗 ${action.amount} ${action.unit || ''} ${action.name || ''}`,
+    'item.set_stock': `盘点 ${action.name || ''} 库存为 ${action.current_stock}`,
+    'item.create': `新建物品 ${action.name || ''}`,
+    'todo.create': `新建待办 ${action.title || ''}`,
+    'todo.complete': `完成待办 #${action.todo_id || ''}`,
+    'todo.reopen': `重开待办 #${action.todo_id || ''}`,
+    'todo.update': `更新待办 #${action.todo_id || ''}`,
+    'todo.delete': `删除待办 #${action.todo_id || ''}`,
+    'query.need_buy': '查询需要购买的日用品',
+    'query.items': `查询库存 ${action.name || ''}`,
+    'query.open_todos': '查询未完成待办',
+    'query.overdue_todos': '查询过期待办',
+  };
+  return labels[action.op] || action.op;
+}
+
+function renderAiWorkbench(message = '', results = null) {
+  const container = document.getElementById('tab-ai');
+  const preview = aiActions.length ? `
+    <div class="ai-preview">
+      <div class="section-title">操作预览</div>
+      ${aiActions.map((action, index) => `<label class="ai-action"><input type="checkbox" data-index="${index}" checked> ${actionLabel(action)}</label>`).join('')}
+      <div class="form-actions"><button class="btn" id="ai-clear">取消</button><button class="btn btn-primary" id="ai-apply">确认写入数据库</button></div>
+    </div>` : '';
+  const resultText = results ? `<pre class="ai-results">${JSON.stringify(results, null, 2)}</pre>` : '';
+  container.innerHTML = `
+    <div class="card ai-workbench">
+      <div class="ai-chips"><button class="btn btn-small ai-chip">加 10 包方便面</button><button class="btn btn-small ai-chip">用掉 2 卷卫生纸</button><button class="btn btn-small ai-chip">新建待办换滤芯</button><button class="btn btn-small ai-chip">现在有什么要买的</button></div>
+      <div class="form-group"><label>用中文描述你想做什么</label><textarea id="ai-text" placeholder="例如：加 10 包方便面，并添加高优先级待办换滤芯">${message}</textarea></div>
+      <div class="form-actions"><button class="btn btn-primary" id="ai-parse">生成操作预览</button></div>
+      <div id="ai-response"></div>${preview}${resultText}
+    </div>`;
+  document.querySelectorAll('.ai-chip').forEach((button) => button.addEventListener('click', () => {
+    document.getElementById('ai-text').value = button.textContent;
+  }));
+  document.getElementById('ai-parse').addEventListener('click', parseAi);
+  document.getElementById('ai-clear')?.addEventListener('click', () => { aiActions = []; renderAiWorkbench(); });
+  document.getElementById('ai-apply')?.addEventListener('click', applyAi);
+}
+
+async function parseAi() {
+  const text = document.getElementById('ai-text').value.trim();
+  if (!text) { toast('请输入指令', 'error'); return; }
+  const { ok, data } = await fetchJSON(API.aiParse, { method: 'POST', body: JSON.stringify({ text }) });
+  if (!ok) { toast(data?.detail || 'AI 解析失败', 'error'); return; }
+  aiActions = data.actions || [];
+  aiConfidence = data.confidence || 'low';
+  renderAiWorkbench(text, data.read_results);
+  const response = document.getElementById('ai-response');
+  response.textContent = data.reply || '已生成操作预览。';
+  response.className = 'ai-reply';
+}
+
+async function applyAi() {
+  const selected = [...document.querySelectorAll('.ai-action input:checked')].map((input) => aiActions[Number(input.dataset.index)]);
+  const writes = selected.filter((action) => !action.op.startsWith('query.'));
+  if (!writes.length) { toast('当前只有查询操作，无需写入', 'info'); return; }
+  const { ok, data } = await fetchJSON(API.aiApply, { method: 'POST', body: JSON.stringify({ actions: writes, raw_text: document.getElementById('ai-text').value.trim(), confidence: aiConfidence }) });
+  if (!ok) { toast(data?.detail || '写入失败', 'error'); return; }
+  aiActions = [];
+  toast('AI 操作已写入', 'success');
+  renderAiWorkbench('', data.results);
+}
+
 // ============ 全局刷新 ============
 
 function initRefresh() {
@@ -768,6 +891,8 @@ function initRefresh() {
     if (currentTab === 'devices') loadDevices();
     if (currentTab === 'uptime') loadUptime();
     if (currentTab === 'items') loadItems();
+    if (currentTab === 'todos') loadTodos();
+    if (currentTab === 'ai') renderAiWorkbench();
   });
 }
 
