@@ -49,6 +49,7 @@
 **已实现：**
 
 - 记录消耗 / 购买，自动改库存
+- 物品可记录分类、存放地点和到期年月；推荐分类：纸品、洗护、清洁、厨房、宠物、冷冻、药品、其他；新增物品时可由 LLM 按名称自动填默认分类
 - **预测**：相邻消耗记录 EWMA 日均（近期权重更高）→ 预计耗尽；库存低于安全库存或预计 `<7` 天时需买；建议量覆盖约 30 天
 - **冷启动兜底**：无/少用量记录时按购买间隔中位数、品类先验或最低库存提示；返回信心等级与预测方法
 - 购物清单汇总
@@ -101,7 +102,8 @@ X-HomeDash-Token: <AGENT_API_TOKEN>
 
 - `POST /api/notify/test` 立即试发；`POST /api/notify/weekly` 按 `NOTIFY_ENABLED` 和静默策略发送；`GET /api/notify/config` 仅返回脱敏状态
 - 汇总未完成重点待办与需购买日用品；SMTP 465 使用 SSL，其他端口使用 STARTTLS
-- QQ 邮箱发件账号与两位收件人通过本地 `.env` 的 `SMTP_*`、`NOTIFY_TO` 配置；SMTP 授权码不会经 API、页面或日志输出
+- QQ 邮箱发件账号与收件人可在「设置」页配置，保存到 `data/notify_config.json` 后热加载；也可继续用本地 `.env` 的 `SMTP_*`、`NOTIFY_TO`
+- SMTP 授权码不会经日志输出，设置页回填时只显示掩码
 - 已通过 Docker 从 QQ SMTP 向两位收件人实发验证（以收件箱确认成功）
 
 ### 6. AI 工作台（已实现）
@@ -275,6 +277,17 @@ docker compose up -d --build
 
 ## 配置
 
+### 设置页（推荐新手）
+
+部署后打开面板，点击 **设置** Tab：
+
+- **配置总览**：实时显示米家设备、小米云端、AI 工作台、SMTP、Agent Token 的状态与缺失项。
+- **米家设备**：直接增删改 `config/devices.yaml`；BLE Mesh 设备需填 did。
+- **小米云端登录**：输入账号密码 → 若需验证码会显示图片 → 输入验证码 → 登录成功后凭据写入 `data/xiaomi_cloud.json`，面板自动用于 BLE Mesh 设备控制。
+- **AI 工作台**：填写 LLM Base URL、API Key、模型，保存后写入 `data/llm_config.json` 并立即生效；可从上游 `/models` 获取模型列表，**无需重启容器**。
+- **SMTP 周报**：填写 SMTP Host、授权码、收件人，保存后写入 `data/notify_config.json` 并立即生效，支持页面测试登录和试发周报。
+- **.env 片段**：Agent Token 等仍需写入宿主机 `.env` 后执行 `docker compose restart`。
+
 ### 米家设备（`config/devices.yaml`）
 
 **WiFi（局域网）：**
@@ -326,6 +339,7 @@ BLE 无 IP 时需方式一补 DID。
 |------|-------------|------|
 | `KUMA_DB_PATH` | 容器内如 `/kuma-data/kuma.db` | Kuma SQLite 路径 |
 | `KUMA_DATA_DIR` | 宿主机目录 | Compose 挂载到容器（见 `.env.example`） |
+| `KUMA_PUBLIC_URL` | 如 `http://127.0.0.1:3001` | 监控页跳转到 Uptime Kuma 配置页面 |
 | `DEVICES_PATH` | `config/devices.yaml` | 设备配置 |
 | `HOMEDASH_PORT` | `8088` | 对外端口 |
 | `XIAOMI_USERNAME` / `XIAOMI_PASSWORD` | - | 仅首次云端登录；成功后可删，凭据在 `data/xiaomi_cloud.json` |
@@ -450,3 +464,13 @@ homedash/
 ## License
 
 MIT
+
+## Agent Skill
+
+`agent-skill/homedash-agent/SKILL.md` 是 Hermes / 其他 agent 操作 HomeDash 的标准接口说明：
+
+- 重点待办 CRUD（含提醒频道、周期提醒、完成标记）
+- 库存查询、EWMA 预测、消耗/购买记账
+- 所有端点、字段、curl 模板、常见对话映射
+
+Agent 加载该 skill 后即可直接通过 `http://127.0.0.1:8088/api/*` 操作面板，无需进 UI。
