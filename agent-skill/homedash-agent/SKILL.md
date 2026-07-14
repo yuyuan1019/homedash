@@ -1,7 +1,7 @@
 ---
 name: homedash-agent
-description: "HomeDash 家庭面板 agent 接口：重点待办 CRUD、提醒查询、库存/预测操作。通过 HTTP 调用 http://127.0.0.1:8088/api/* 让 agent 直接操作用户的待办与日用品库存。"
-version: 1
+description: "HomeDash 家庭面板 agent 接口：重点待办 CRUD、提醒查询、库存/预测操作。通过 HTTP 调用自托管的 HomeDash API 让 agent 直接操作用户的待办与日用品库存。"
+version: 1.1
 tags: [homedash, todos, inventory, agent, http]
 triggers:
   - 用户提到 HomeDash / 家庭面板 / 重点待办 / 库存
@@ -11,26 +11,36 @@ triggers:
 
 # HomeDash Agent Skill
 
-HomeDash 是用户自托管的家庭管理面板，跑在 `http://127.0.0.1:8088`（Docker 容器）。  
-本 skill 让 agent 通过 HTTP 调用其 API 直接操作**重点待办**与**日用品库存**，无需进面板。
+HomeDash 是用户自托管的家庭管理面板。本 skill 让 agent 通过 HTTP 调用其 API 直接操作**重点待办**与**日用品库存**，无需进面板。
 
-## 0. 何时使用
+## 0. 部署地址
 
-- 用户说「帮我建个待办」「提醒我明天 9 点 XX」「家里 XX 还有多少」「刚用了/买了 XX」
-- cron job 要周期性查待办或库存（例如每周一早上推送周报、查即将到期的待办）
-- 任何其他需要读写 HomeDash 数据的场景
+**HomeDash URL 由用户环境决定**，常见场景：
+- 本机部署：`http://127.0.0.1:8088` 或 `http://localhost:8088`
+- 内网访问：`http://192.168.x.x:8088`
+- 反向代理：`https://homedash.example.com`
+
+**获取方式**：
+- 问用户「你的 HomeDash 地址是什么？」
+- 如果是本机部署，默认尝试 `http://127.0.0.1:8088`
+- 检查环境变量 `HOMEDASH_URL`（如果用户设置了）
+
+下文用 `${HOMEDASH_URL}` 代指实际地址。
 
 ## 1. 鉴权
 
-- 端点分两类：
-  - 普通 `/api/todos/*`、`/api/items/*`：无鉴权（本地 loopback）
-  - `/api/agent/*`：需要 header `X-Homedash-Token: <token>` 或 `Authorization: Bearer <token>`
-- token 取自 HomeDash 的 `.env` 中 `AGENT_API_TOKEN`。若未设置则跳过校验。
-- 查 token：`grep AGENT_API_TOKEN ~/MyProjects/homedash/.env`
+端点分两类：
+- **普通端点** `/api/todos/*`、`/api/items/*`：无鉴权（依赖网络隔离）
+- **Agent 端点** `/api/agent/*`：需要 header `X-Homedash-Token: ${TOKEN}` 或 `Authorization: Bearer ${TOKEN}`
+
+**Token 来源**：
+- HomeDash 部署目录的 `.env` 文件中 `AGENT_API_TOKEN`
+- 如果未设置该变量，则跳过校验（不推荐生产环境）
+- 问用户「你的 AGENT_API_TOKEN 是什么？」或让用户从 `.env` 中读取
 
 ## 2. 重点待办 API
 
-基础：`http://127.0.0.1:8088/api`
+基础：`${HOMEDASH_URL}/api`
 
 | 操作 | 方法 | 路径 | 说明 |
 |------|------|------|------|
@@ -47,17 +57,25 @@ HomeDash 是用户自托管的家庭管理面板，跑在 `http://127.0.0.1:8088
 
 ```json
 {
-  "title": "换净水器滤芯",           // 必填
-  "note": "柜下 3M",                 // 可选
-  "priority": "high",                // high/medium/low，默认 medium
-  "due_date": "2026-07-31",          // YYYY-MM-DD 或 null
-  "assignee": "yuan",                // 负责人，可选
-  "remind_at": "2026-07-20T09:00:00",// ISO 或 null
-  "remind_channels": ["qq", "wechat"],// 提醒频道
-  "remind_repeat": "weekly",         // none/once/daily/weekly
-  "external_ref": "qq-msg-123"       // 外部关联 ID
+  "title": "换净水器滤芯",
+  "note": "柜下 3M",
+  "priority": "high",
+  "due_date": "2026-07-31",
+  "assignee": "yuan",
+  "remind_at": "2026-07-20T09:00:00",
+  "remind_channels": ["qq", "wechat"],
+  "remind_repeat": "weekly",
+  "external_ref": "qq-msg-123"
 }
 ```
+
+**字段说明**：
+- `title`：必填
+- `priority`：high/medium/low，默认 medium
+- `due_date`：YYYY-MM-DD 或 null
+- `remind_at`：ISO 格式（如 `2026-07-20T09:00:00`），缺时区则按服务器时区（通常 Asia/Shanghai）解析
+- `remind_channels`：提醒频道标识（如 `qq`/`wechat`/`telegram`），由外部系统投递
+- `remind_repeat`：none/once/daily/weekly
 
 **返回字段**：id, title, note, priority, due_date, assignee, status, remind_at, remind_channels, remind_repeat, external_ref, overdue (bool), created_at, updated_at, completed_at.
 
@@ -77,7 +95,6 @@ HomeDash 是用户自托管的家庭管理面板，跑在 `http://127.0.0.1:8088
 | 单个详情 | GET | `/items/{id}` | 含 history |
 | 新建 | POST | `/items` | body: name/category/unit/current_stock/min_stock/location/expires_at |
 | 改库存 | PUT | `/items/{id}` | body: 部分字段 |
-| 直接设库存 | （无公开端点，走 usage/purchase 调） | | |
 | 记消耗 | POST | `/items/{id}/usage` | body: amount, note |
 | 记购买 | POST | `/items/{id}/purchase` | body: amount, price, note |
 | 历史 | GET | `/items/{id}/history` | 合并 usage+purchase |
@@ -97,24 +114,39 @@ HomeDash 是用户自托管的家庭管理面板，跑在 `http://127.0.0.1:8088
 
 **库存方向**：`usage` 减库存，`purchase` 加库存。**写反是 P0 bug**。
 
-## 4. curl 模板
+## 4. HTTP 请求模板
 
+**列未完成的待办（带 token）**：
 ```bash
-# 列未完成的待办（带 token）
-curl -s -H "X-Homedash-Token: $TOKEN" 'http://127.0.0.1:8088/api/agent/todos/open' | jq
+curl -s -H "X-Homedash-Token: ${TOKEN}" '${HOMEDASH_URL}/api/agent/todos/open' | jq
+```
 
-# 创建高优先级待办，明天 9 点提醒
-curl -s -X POST -H "X-Homedash-Token: $TOKEN" -H 'Content-Type: application/json' \
-  'http://127.0.0.1:8088/api/agent/todos' \
-  -d '{"title":"洗车","priority":"high","due_date":"2026-07-16","remind_at":"2026-07-16T09:00:00","remind_channels":["qq"]}'
+**创建高优先级待办，明天 9 点提醒**：
+```bash
+curl -s -X POST \
+  -H "X-Homedash-Token: ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  '${HOMEDASH_URL}/api/agent/todos' \
+  -d '{
+    "title": "洗车",
+    "priority": "high",
+    "due_date": "2026-07-16",
+    "remind_at": "2026-07-16T09:00:00",
+    "remind_channels": ["qq"]
+  }'
+```
 
-# 查库存预警
-curl -s 'http://127.0.0.1:8088/api/items/predictions' | jq '.need_buy | length'
+**查库存预警**：
+```bash
+curl -s '${HOMEDASH_URL}/api/items/predictions' | jq '.need_buy | length'
+```
 
-# 记一笔消耗（洗手液用了 0.5 瓶）
-curl -s -X POST -H 'Content-Type: application/json' \
-  'http://127.0.0.1:8088/api/items/3/usage' \
-  -d '{"amount":0.5,"note":"洗手"}'
+**记一笔消耗（洗手液用了 0.5 瓶）**：
+```bash
+curl -s -X POST \
+  -H 'Content-Type: application/json' \
+  '${HOMEDASH_URL}/api/items/3/usage' \
+  -d '{"amount": 0.5, "note": "洗手"}'
 ```
 
 ## 5. 常见 agent 对话 → API 映射
@@ -126,46 +158,47 @@ curl -s -X POST -H 'Content-Type: application/json' \
 | 「我有哪些待办」 | GET `/agent/todos/open` |
 | 「有没有快到期/过期的待办」 | GET `/agent/todos/due?within_minutes=1440` |
 | 「那个待办做完了」 | POST `/agent/todos/{id}/done` |
-| «家里的纸/洗衣液还有多少» | GET `/items`，按 name 匹配 |
-| «哪些东西要买了» | GET `/items/predictions`，读 need_buy |
-| «刚买了 2 瓶洗手液» | POST `/items/{id}/purchase` with amount=2 |
-| «用了 1 卷纸» | POST `/items/{id}/usage` with amount=1 |
+| 「家里的纸/洗衣液还有多少」 | GET `/items`，按 name 匹配 |
+| 「哪些东西要买了」 | GET `/items/predictions`，读 need_buy |
+| 「刚买了 2 瓶洗手液」 | POST `/items/{id}/purchase` with amount=2 |
+| 「用了 1 卷纸」 | POST `/items/{id}/usage` with amount=1 |
 
-## 6. 陷阱
+## 6. 陷阱与注意事项
 
-- **时间格式**：`remind_at` 必须 ISO（`2026-07-20T09:00:00`），缺时区则按 `Asia/Shanghai` 解析。
-- **due_date**：必须 `YYYY-MM-DD`，不能带时间。
-- **priority**：只能 high/medium/low，写错 400。
-- **remind_channels**：是 list[str]，存 JSON 字符串。可填 `qq` / `wechat` / `telegram` 或任意标识，由外部（Hermes cron）投递。
-- **库存方向**：usage 减、purchase 加。**不要自己写 SQL**。
-- **物品 ID**：创建后返回 `{id: N}`，后续操作需这个 id。如果用户只给名字，先 GET `/items` 找 id。
-- **agent 端点 vs 普通端点**：`/agent/*` 要 token；普通 `/todos`、`/items` 不要。优先用 `/agent/*`（语义更明确、支持过滤）。
-- **容器未启动时**：`curl` 会 connection refused。先 `docker ps | grep homedash`。
+- **时间格式**：`remind_at` 必须 ISO（`2026-07-20T09:00:00`），缺时区则按服务器时区解析
+- **due_date**：必须 `YYYY-MM-DD`，不能带时间
+- **priority**：只能 high/medium/low，写错返回 400
+- **remind_channels**：是 list[str]，存 JSON 字符串。可填任意标识，由外部系统投递
+- **库存方向**：usage 减、purchase 加。**不要自己写 SQL**
+- **物品 ID**：创建后返回 `{id: N}`，后续操作需这个 id。如果用户只给名字，先 GET `/items` 找 id
+- **agent 端点 vs 普通端点**：`/agent/*` 要 token；普通 `/todos`、`/items` 不要。优先用 `/agent/*`（语义更明确、支持过滤）
+- **服务未启动时**：`curl` 会 connection refused。先确认 HomeDash 是否运行
 
-## 7. 与 cron 配合
+## 7. 与定时任务配合
 
 典型场景：每天早上 8 点推送今日待办。
 
-```python
-# Hermes cron prompt 示例
-"""
-查 HomeDash 今日待办：
-curl -s -H "X-Homedash-Token: $TOKEN" 'http://127.0.0.1:8088/api/agent/todos/due?within_minutes=1440&channel=qq'
-如果有 items，逐条用中文推送给用户；如果没有，静默。
-"""
+```bash
+# 查询今日到期的待办
+curl -s -H "X-Homedash-Token: ${TOKEN}" \
+  '${HOMEDASH_URL}/api/agent/todos/due?within_minutes=1440&channel=qq'
+
+# 如果有 items，逐条推送给用户；如果没有，静默
 ```
 
 ## 8. 自检
 
+**健康检查**：
 ```bash
-# 健康检查
-curl -sf http://127.0.0.1:8088/api/todos/summary | jq .
+curl -sf '${HOMEDASH_URL}/api/todos/summary' | jq .
+```
 
-# token 可用
-TOKEN=$(grep AGENT_API_TOKEN ~/MyProjects/homedash/.env | cut -d= -f2)
-curl -sf -H "X-Homedash-Token: $TOKEN" http://127.0.0.1:8088/api/agent/todos/open | jq .
+**Token 可用性**：
+```bash
+curl -sf -H "X-Homedash-Token: ${TOKEN}" \
+  '${HOMEDASH_URL}/api/agent/todos/open' | jq .
 ```
 
 ---
 
-_最后更新：2026-07-15 · 基于 HomeDash 代码现状（todos.py / items.py）。_
+_最后更新：2026-07-15 · v1.1 通用化版本 · 基于 HomeDash 代码现状（todos.py / items.py）_

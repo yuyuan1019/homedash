@@ -19,6 +19,24 @@ const API = {
   todoReopen: (id) => `/api/todos/${id}/reopen`,
   aiParse: '/api/ai/parse',
   aiApply: '/api/ai/apply',
+  aiItemCategory: '/api/ai/item-category',
+  setupStatus: '/api/setup/status',
+  setupDevices: '/api/setup/devices',
+  setupDevice: (name) => `/api/setup/devices/${encodeURIComponent(name)}`,
+  setupXiaomiStep1: '/api/setup/xiaomi-cloud/login-step1',
+  setupXiaomiStep2: '/api/setup/xiaomi-cloud/login-step2',
+  setupXiaomiTest: '/api/setup/xiaomi-cloud/test',
+  setupBleDevices: '/api/setup/ble-devices',
+  setupAppConfig: '/api/setup/app/config',
+  setupAppSave: '/api/setup/app/save',
+  setupLlmConfig: '/api/setup/llm/config',
+  setupLlmSave: '/api/setup/llm/save',
+  setupLlmTest: '/api/setup/llm/test',
+  setupLlmModels: '/api/setup/llm/models',
+  setupNotifyConfig: '/api/setup/notify/config',
+  setupNotifySave: '/api/setup/notify/save',
+  setupNotifyTest: '/api/setup/notify/test',
+  notifyTest: '/api/notify/test',
 };
 
 const TYPE_GROUPS = [
@@ -37,13 +55,16 @@ const TYPE_GROUPS = [
 
 const TYPE_FALLBACK = { key: 'other', label: '其他', icon: '📦' };
 
-let currentTab = 'devices';
+let currentTab = 'ai';
 let devicesData = [];
 let deviceStatusMap = {}; // name -> status
 let autoRefreshTimer = null;
 let todoStatus = 'open';
 let aiActions = [];
 let aiConfidence = 'low';
+let setupStatusData = null;
+let xiaomiLoginStateId = null;
+let itemCategoryTimer = null;
 
 // ============ 工具函数 ============
 
@@ -76,6 +97,12 @@ function showModal(html) {
 
 function closeModal() {
   document.getElementById('modal').classList.add('hidden');
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+  }[c]));
 }
 
 function fmtDate(iso) {
@@ -112,12 +139,44 @@ function switchTab(tab) {
   if (tab === 'items') loadItems();
   if (tab === 'todos') loadTodos();
   if (tab === 'ai') renderAiWorkbench();
+  if (tab === 'setup') loadSetup();
 }
 
 function initTabs() {
   document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
+  
+  // 滑动切换 tab
+  let touchStartX = 0;
+  let touchStartY = 0;
+  const tabOrder = ['ai', 'items', 'todos', 'uptime', 'devices'];
+  
+  document.addEventListener('touchstart', (e) => {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+  }, { passive: true });
+  
+  document.addEventListener('touchend', (e) => {
+    const touchEndX = e.changedTouches[0].clientX;
+    const touchEndY = e.changedTouches[0].clientY;
+    const diffX = touchStartX - touchEndX;
+    const diffY = touchStartY - touchEndY;
+    
+    // 水平滑动距离大于垂直滑动，且超过阈值
+    if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > 50) {
+      const currentIndex = tabOrder.indexOf(currentTab);
+      if (currentIndex === -1) return;
+      
+      if (diffX > 0 && currentIndex < tabOrder.length - 1) {
+        // 向左滑，下一个 tab
+        switchTab(tabOrder[currentIndex + 1]);
+      } else if (diffX < 0 && currentIndex > 0) {
+        // 向右滑，上一个 tab
+        switchTab(tabOrder[currentIndex - 1]);
+      }
+    }
+  }, { passive: true });
 }
 
 // ============ 设备 Tab ============
@@ -175,20 +234,20 @@ function renderDeviceCard(dev) {
   ].filter(Boolean).join(' ');
 
   const updated = status?.updated_at ? ` · 更新 ${status.updated_at.slice(11, 16)}` : '';
-  const error = status?.error ? `<div class="device-error">${status.error}</div>` : '';
+  const error = status?.error ? `<div class="device-error">${esc(status.error)}</div>` : '';
 
   return `
-    <div class="${tileClass}" data-name="${dev.name}">
+    <div class="${tileClass}" data-name="${esc(dev.name)}">
       <div class="device-tile-top">
         <div class="device-icon ${powerOn ? 'on' : ''}">${getDeviceEmoji(dev.type)}</div>
         <label class="switch" title="${disabled ? '不可控' : (powerOn ? '关闭' : '开启')}">
-          <input type="checkbox" class="power-switch" data-name="${dev.name}"
+          <input type="checkbox" class="power-switch" data-name="${esc(dev.name)}"
             ${powerOn ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
           <span class="slider"></span>
         </label>
       </div>
       <div>
-        <div class="device-name">${dev.name}</div>
+        <div class="device-name">${esc(dev.name)}</div>
         <div class="device-meta">
           <span class="status-dot ${online === true ? 'up' : (online === false ? 'down' : 'unknown')}"></span>
           ${statusText}${updated}
@@ -304,6 +363,23 @@ async function loadDevices() {
   renderDevices();
 }
 
+async function preloadDeviceStatus() {
+  // 预加载设备状态，进入设备页时可立即显示
+  try {
+    const [listRes, statusRes] = await Promise.all([
+      fetchJSON(API.devices),
+      fetchJSON(API.deviceStatus).catch(() => ({ ok: false })),
+    ]);
+    if (listRes.ok) devicesData = listRes.data || [];
+    if (statusRes.ok) {
+      deviceStatusMap = {};
+      (statusRes.data || []).forEach((s) => { deviceStatusMap[s.name] = s; });
+    }
+  } catch (e) {
+    // 预加载失败不影响后续操作
+  }
+}
+
 async function showDeviceManager() {
   const { ok, data } = await fetchJSON(`${API.devices}?include_hidden=true`);
   if (!ok) { toast(data?.detail || '设备列表加载失败', 'error'); return; }
@@ -329,30 +405,72 @@ async function setDeviceVisibility(name, hidden) {
 
 // ============ 监控 Tab ============
 
+function fmtUptimeUrl(url) {
+  if (!url) return '';
+  return String(url).replace(/^https?:\/\//, '').replace(/\/$/, '');
+}
+
+function fmtAgo(ts) {
+  if (!ts) return '—';
+  const sec = Math.floor(Date.now() / 1000 - Number(ts));
+  if (sec < 0 || Number.isNaN(sec)) return '—';
+  if (sec < 60) return `${sec} 秒前`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
+  return `${Math.floor(sec / 86400)} 天前`;
+}
+
 function renderUptime(res) {
   const container = document.getElementById('tab-uptime');
+  const link = res.public_url ? `<a class="btn btn-primary" href="${esc(res.public_url)}" target="_blank" rel="noopener">打开 Uptime 配置</a>` : '<span class="setup-help">设置 <code>KUMA_PUBLIC_URL</code> 后可从这里跳转到 Uptime Kuma 配置页。</span>';
+  const toolbar = `<div class="toolbar">${link}<button class="btn" id="refresh-uptime-btn">刷新监控</button></div>`;
   if (!res.available || res.source === 'unavailable') {
-    container.innerHTML = '<div class="empty-state">Uptime Kuma 数据库未连接，请检查 KUMA_DB_PATH 配置</div>';
+    container.innerHTML = `${toolbar}<div class="empty-state">Uptime Kuma 数据库未连接，请检查 KUMA_DB_PATH 配置</div>`;
+    document.getElementById('refresh-uptime-btn')?.addEventListener('click', loadUptime);
     return;
   }
   const monitors = res.monitors || [];
   if (!monitors.length) {
-    container.innerHTML = '<div class="empty-state">暂无监控数据</div>';
+    container.innerHTML = `${toolbar}<div class="empty-state">暂无监控数据</div>`;
+    document.getElementById('refresh-uptime-btn')?.addEventListener('click', loadUptime);
     return;
   }
+
+  const sorted = monitors.slice().sort((a, b) => (a.status === 1 ? 1 : -1) - (b.status === 1 ? 1 : -1));
+  const total = monitors.length;
+  const upCount = monitors.filter((m) => m.status === 1).length;
+  const downCount = total - upCount;
+  const rate = total ? Math.round((upCount / total) * 100) : 0;
+
   container.innerHTML = `
-    <div class="card">
-      ${monitors.map((m) => {
+    ${toolbar}
+    <div class="uptime-summary">
+      <div class="uptime-summary-item"><div class="uptime-summary-value">${total}</div><div class="uptime-summary-label">监控总数</div></div>
+      <div class="uptime-summary-item up"><div class="uptime-summary-value">${upCount}</div><div class="uptime-summary-label">在线</div></div>
+      <div class="uptime-summary-item down"><div class="uptime-summary-value">${downCount}</div><div class="uptime-summary-label">离线</div></div>
+      <div class="uptime-summary-item rate"><div class="uptime-summary-value">${rate}%</div><div class="uptime-summary-label">可用率</div></div>
+    </div>
+    <div class="uptime-grid">
+      ${sorted.map((m) => {
         const up = m.status === 1;
+        const url = fmtUptimeUrl(m.url);
         return `
-          <div class="monitor-row" title="${m.msg || ''}">
-            <span class="status-dot ${up ? 'up' : 'down'}"></span>
-            <span style="flex:1;">${m.name}</span>
-            <span class="badge ${up ? 'badge-ok' : 'badge-danger'} badge-outline">${up ? 'UP' : 'DOWN'}</span>
-            <span style="width:70px;text-align:right;color:var(--muted);font-size:0.85rem;">${up && m.ping ? m.ping + 'ms' : '—'}</span>
+          <div class="uptime-card ${up ? 'up' : 'down'}" title="${esc(m.msg || '')}">
+            <div class="uptime-card-header">
+              <div class="uptime-card-name">${esc(m.name)}</div>
+              <span class="uptime-status-badge ${up ? 'up' : 'down'}">
+                <span class="status-dot ${up ? 'up' : 'down'}"></span>${up ? 'UP' : 'DOWN'}
+              </span>
+            </div>
+            ${url ? `<div class="uptime-card-url">${esc(url)}</div>` : ''}
+            <div class="uptime-card-footer">
+              <span class="uptime-card-ping">${up && m.ping ? `⏱ ${m.ping} ms` : '—'}</span>
+              <span>${fmtAgo(m.time)}</span>
+            </div>
           </div>`;
       }).join('')}
     </div>`;
+  document.getElementById('refresh-uptime-btn')?.addEventListener('click', loadUptime);
 }
 
 async function loadUptime() {
@@ -381,15 +499,17 @@ function renderItemCard(item) {
   const days = p.days_until_empty;
   const daysText = days === null || days === undefined ? '—' : `${Math.floor(days)} 天`;
   const suggest = p.need_buy ? `建议 ${p.suggested_qty} ${item.unit || '个'}` : '';
+  const place = item.location ? ` · ${esc(item.location)}` : '';
+  const expiry = item.expires_at ? ` · 到期 ${esc(item.expires_at)}` : '';
   return `
     <div class="item-card" data-id="${item.id}">
       <div class="item-info">
-        <div class="item-name">${item.name} ${getBadge(item)}</div>
-        <div class="item-meta">${item.category || '未分类'} · 剩余 ${fmtNumber(item.current_stock)} ${item.unit || '个'}</div>
+        <div class="item-name">${esc(item.name)} ${getBadge(item)}</div>
+        <div class="item-meta">${esc(item.category || '未分类')} · 剩余 ${fmtNumber(item.current_stock)} ${esc(item.unit || '个')}${place}${expiry}</div>
       </div>
       <div class="item-tags">
         <span class="badge badge-outline">预计 ${daysText}</span>
-        ${suggest ? `<span class="badge badge-warn">${suggest}</span>` : ''}
+        ${suggest ? `<span class="badge badge-warn">${esc(suggest)}</span>` : ''}
       </div>
     </div>`;
 }
@@ -467,7 +587,8 @@ function showItemForm(item = null) {
       </div>
       <div class="form-group">
         <label>分类</label>
-        <input id="item-category" value="${item?.category || ''}">
+        <input id="item-category" list="item-category-list" value="${item?.category || ''}">
+        <datalist id="item-category-list"><option value="纸品"><option value="洗护"><option value="清洁"><option value="厨房"><option value="宠物"><option value="冷冻"><option value="药品"><option value="其他"></datalist>
       </div>
       <div class="form-group">
         <label>单位</label>
@@ -481,6 +602,14 @@ function showItemForm(item = null) {
         <label>最低库存</label>
         <input type="number" step="any" id="item-min" value="${item?.min_stock ?? 1}">
       </div>
+      <div class="form-group">
+        <label>存放地点</label>
+        <input id="item-location" placeholder="如：卫生间 / 厨房柜 / 储物间" value="${item?.location || ''}">
+      </div>
+      <div class="form-group">
+        <label>到期年月</label>
+        <input type="month" id="item-expires" value="${item?.expires_at || ''}">
+      </div>
       <div class="form-actions">
         <button class="btn modal-cancel">取消</button>
         <button class="btn btn-primary" id="save-item">${isEdit ? '保存' : '添加'}</button>
@@ -488,6 +617,18 @@ function showItemForm(item = null) {
     </div>`);
   bindModalClose();
   document.getElementById('save-item').addEventListener('click', () => saveItem(item?.id));
+  if (!isEdit) document.getElementById('item-name').addEventListener('blur', suggestItemCategory);
+}
+
+async function suggestItemCategory() {
+  const name = document.getElementById('item-name').value.trim();
+  const categoryInput = document.getElementById('item-category');
+  if (!name || categoryInput.value.trim()) return;
+  clearTimeout(itemCategoryTimer);
+  itemCategoryTimer = setTimeout(async () => {
+    const { ok, data } = await fetchJSON(API.aiItemCategory, { method: 'POST', body: JSON.stringify({ name }) });
+    if (ok && data?.category && !categoryInput.value.trim()) categoryInput.value = data.category;
+  }, 200);
 }
 
 async function saveItem(id) {
@@ -497,6 +638,8 @@ async function saveItem(id) {
     unit: document.getElementById('item-unit').value.trim() || '个',
     current_stock: parseFloat(document.getElementById('item-stock').value) || 0,
     min_stock: parseFloat(document.getElementById('item-min').value) || 0,
+    location: document.getElementById('item-location').value.trim() || null,
+    expires_at: document.getElementById('item-expires').value || null,
   };
   if (!payload.name) { toast('名称必填', 'error'); return; }
   const { ok, data } = await fetchJSON(id ? API.item(id) : API.items, {
@@ -513,30 +656,34 @@ async function saveItem(id) {
 }
 
 async function showItemDetail(id) {
-  const [{ data: item }, { data: history }] = await Promise.all([
+  const [itemRes, historyRes] = await Promise.all([
     fetchJSON(API.item(id)),
     fetchJSON(API.itemHistory(id)),
   ]);
-  if (!item) { toast('物品不存在', 'error'); return; }
+  if (!itemRes.ok) { toast(itemRes.data?.detail || '物品不存在', 'error'); return; }
+  const item = itemRes.data;
+  const history = historyRes.ok ? historyRes.data : [];
   const p = item.prediction || {};
-  const daysText = p.days_until_empty === null ? '—' : `${Math.floor(p.days_until_empty)} 天`;
+  const daysText = Number.isFinite(p.days_until_empty) ? `${Math.floor(p.days_until_empty)} 天` : '—';
+  const place = item.location ? ` · ${esc(item.location)}` : '';
+  const expiry = item.expires_at ? ` · 到期 ${esc(item.expires_at)}` : '';
   const historyHtml = (history || []).slice().reverse().map((h) => {
     const isUsage = h.type === 'usage';
     return `
       <div class="history-item">
-        <span>${isUsage ? '🔴 消耗' : '🟢 购买'} ${fmtNumber(h.amount)} ${item.unit || '个'}</span>
-        <span style="color:var(--muted);font-size:0.8rem;">${fmtDate(h.at)} ${h.note || ''}</span>
+        <span>${isUsage ? '🔴 消耗' : '🟢 购买'} ${fmtNumber(h.amount)} ${esc(item.unit || '个')}</span>
+        <span style="color:var(--muted);font-size:0.8rem;">${fmtDate(h.at)} ${esc(h.note || '')}</span>
       </div>`;
   }).join('') || '<div class="empty-state" style="padding:1rem;">暂无记录</div>';
 
   showModal(`
     <div class="modal-content">
       <div class="modal-header">
-        <div class="modal-title">${item.name}</div>
+        <div class="modal-title">${esc(item.name)}</div>
         <button class="close-btn">&times;</button>
       </div>
       <div style="margin-bottom:1rem;color:var(--muted);font-size:0.9rem;">
-        ${item.category || '未分类'} · 剩余 ${fmtNumber(item.current_stock)} ${item.unit || '个'} · 预计 ${daysText}
+        ${esc(item.category || '未分类')} · 剩余 ${fmtNumber(item.current_stock)} ${esc(item.unit || '个')} · 预计 ${daysText}${place}${expiry}
       </div>
       <div class="toolbar" style="margin-bottom:0.8rem;">
         <button class="btn" id="log-usage-btn">记录消耗</button>
@@ -652,7 +799,7 @@ function todoPriorityLabel(priority) {
 
 function todoPriorityBadge(priority) {
   const cls = { high: 'badge-danger', medium: 'badge-warn', low: 'badge-ok' }[priority] || 'badge-warn';
-  return `<span class="badge ${cls}">${todoPriorityLabel(priority)}</span>`;
+  return `<span class="badge ${cls}">${esc(todoPriorityLabel(priority))}</span>`;
 }
 
 function renderTodoCard(todo) {
@@ -665,9 +812,9 @@ function renderTodoCard(todo) {
   return `
     <div class="todo-card ${todo.status === 'done' ? 'done' : ''} ${todo.overdue ? 'overdue' : ''}" data-id="${todo.id}">
       <div class="todo-main">
-        <div class="todo-title">${todo.title} ${todoPriorityBadge(todo.priority)} ${todo.overdue ? '<span class="badge badge-danger">已过期</span>' : ''}</div>
-        <div class="todo-meta">${meta}</div>
-        ${todo.note ? `<div class="todo-note">${todo.note}</div>` : ''}
+        <div class="todo-title">${esc(todo.title)} ${todoPriorityBadge(todo.priority)} ${todo.overdue ? '<span class="badge badge-danger">已过期</span>' : ''}</div>
+        <div class="todo-meta">${esc(meta)}</div>
+        ${todo.note ? `<div class="todo-note">${esc(todo.note)}</div>` : ''}
       </div>
       <div class="todo-actions">
         ${action}
@@ -830,55 +977,134 @@ function actionLabel(action) {
     'query.open_todos': '查询未完成待办',
     'query.overdue_todos': '查询过期待办',
   };
-  return labels[action.op] || action.op;
+  return esc(labels[action.op] || action.op);
 }
 
-function renderAiWorkbench(message = '', results = null) {
+function renderAiWorkbench(message = '', results = null, lastActionId = null) {
   const container = document.getElementById('tab-ai');
-  const preview = aiActions.length ? `
-    <div class="ai-preview">
-      <div class="section-title">操作预览</div>
-      ${aiActions.map((action, index) => `<label class="ai-action"><input type="checkbox" data-index="${index}" checked> ${actionLabel(action)}</label>`).join('')}
-      <div class="form-actions"><button class="btn" id="ai-clear">取消</button><button class="btn btn-primary" id="ai-apply">确认写入数据库</button></div>
-    </div>` : '';
-  const resultText = results ? `<pre class="ai-results">${JSON.stringify(results, null, 2)}</pre>` : '';
+  
+  // 隐藏技术性描述，只显示用户友好的结果
+  const userFriendlyResults = results ? formatResultsForUser(results) : null;
+  const resultText = userFriendlyResults ? `<div class="ai-results-user">${userFriendlyResults}</div>` : '';
+  
+  // 撤回按钮
+  const revertButton = lastActionId ? `
+    <div class="form-actions" style="margin-top: 1rem;">
+      <button class="btn" id="ai-revert" style="color: var(--down);">↶ 撤回上次操作</button>
+    </div>
+  ` : '';
+  
   container.innerHTML = `
     <div class="card ai-workbench">
       <div class="ai-chips"><button class="btn btn-small ai-chip">加 10 包方便面</button><button class="btn btn-small ai-chip">用掉 2 卷卫生纸</button><button class="btn btn-small ai-chip">新建待办换滤芯</button><button class="btn btn-small ai-chip">现在有什么要买的</button></div>
-      <div class="form-group"><label>用中文描述你想做什么</label><textarea id="ai-text" placeholder="例如：加 10 包方便面，并添加高优先级待办换滤芯">${message}</textarea></div>
-      <div class="form-actions"><button class="btn btn-primary" id="ai-parse">生成操作预览</button></div>
-      <div id="ai-response"></div>${preview}${resultText}
+      <div class="form-group"><label>用中文描述你想做什么</label><textarea id="ai-text" placeholder="例如：加 10 包方便面，并添加高优先级待办换滤芯">${esc(message)}</textarea></div>
+      <div class="form-actions"><button class="btn btn-primary" id="ai-parse">执行</button></div>
+      <div id="ai-loading" class="ai-loading" style="display: none;">
+        <div class="ai-loading-spinner"></div>
+        <div class="ai-loading-text">思考中...</div>
+      </div>
+      <div id="ai-response"></div>${resultText}${revertButton}
     </div>`;
   document.querySelectorAll('.ai-chip').forEach((button) => button.addEventListener('click', () => {
     document.getElementById('ai-text').value = button.textContent;
   }));
   document.getElementById('ai-parse').addEventListener('click', parseAi);
-  document.getElementById('ai-clear')?.addEventListener('click', () => { aiActions = []; renderAiWorkbench(); });
-  document.getElementById('ai-apply')?.addEventListener('click', applyAi);
+  if (lastActionId) {
+    document.getElementById('ai-revert').addEventListener('click', () => revertAi(lastActionId));
+  }
+}
+
+function formatResultsForUser(results) {
+  if (!Array.isArray(results) || results.length === 0) return '';
+  
+  const lines = [];
+  results.forEach(r => {
+    if (r.op === 'item.purchase') {
+      lines.push(`✓ 已购买 ${r.purchased} ${r.unit || ''} ${r.name || ''}`);
+    } else if (r.op === 'item.usage') {
+      lines.push(`✓ 已消耗 ${r.consumed} ${r.unit || ''} ${r.name || ''}`);
+    } else if (r.op === 'item.create') {
+      lines.push(`✓ 已创建物品 ${r.name || ''}`);
+    } else if (r.op === 'todo.create') {
+      lines.push(`✓ 已创建待办 ${r.title || ''}`);
+    } else if (r.op === 'todo.complete') {
+      lines.push(`✓ 已完成待办 #${r.todo_id || ''}`);
+    } else if (r.op?.startsWith('query.')) {
+      // 查询结果不显示技术细节
+      lines.push(`✓ 查询完成`);
+    }
+  });
+  
+  return lines.join('<br>');
 }
 
 async function parseAi() {
   const text = document.getElementById('ai-text').value.trim();
   if (!text) { toast('请输入指令', 'error'); return; }
-  const { ok, data } = await fetchJSON(API.aiParse, { method: 'POST', body: JSON.stringify({ text }) });
-  if (!ok) { toast(data?.detail || 'AI 解析失败', 'error'); return; }
-  aiActions = data.actions || [];
-  aiConfidence = data.confidence || 'low';
-  renderAiWorkbench(text, data.read_results);
-  const response = document.getElementById('ai-response');
-  response.textContent = data.reply || '已生成操作预览。';
-  response.className = 'ai-reply';
+  
+  // 显示加载动画
+  document.getElementById('ai-loading').style.display = 'flex';
+  document.getElementById('ai-parse').disabled = true;
+  
+  try {
+    const { ok, data } = await fetchJSON(API.aiParse, { method: 'POST', body: JSON.stringify({ text }) });
+    if (!ok) { 
+      toast(data?.detail || 'AI 解析失败', 'error'); 
+      return; 
+    }
+    
+    aiActions = data.actions || [];
+    aiConfidence = data.confidence || 'low';
+    
+    // 自动执行写操作，不显示确认界面
+    const writes = aiActions.filter((action) => !action.op.startsWith('query.'));
+    if (writes.length > 0) {
+      const applyResult = await fetchJSON(API.aiApply, { 
+        method: 'POST', 
+        body: JSON.stringify({ 
+          actions: writes, 
+          raw_text: text, 
+          confidence: aiConfidence 
+        }) 
+      });
+      
+      if (applyResult.ok) {
+        const actionId = applyResult.data?.action_id || null;
+        renderAiWorkbench('', applyResult.data?.results || data.read_results, actionId);
+        
+        // 显示友好结果
+        const response = document.getElementById('ai-response');
+        response.textContent = data.reply || '操作已完成。';
+        response.className = 'ai-reply';
+      } else {
+        toast(applyResult.data?.detail || '执行失败', 'error');
+      }
+    } else {
+      // 只有查询操作
+      renderAiWorkbench('', data.read_results);
+      const response = document.getElementById('ai-response');
+      response.textContent = data.reply || '查询完成。';
+      response.className = 'ai-reply';
+    }
+  } catch (e) {
+    toast('请求失败', 'error');
+  } finally {
+    document.getElementById('ai-loading').style.display = 'none';
+    document.getElementById('ai-parse').disabled = false;
+  }
 }
 
-async function applyAi() {
-  const selected = [...document.querySelectorAll('.ai-action input:checked')].map((input) => aiActions[Number(input.dataset.index)]);
-  const writes = selected.filter((action) => !action.op.startsWith('query.'));
-  if (!writes.length) { toast('当前只有查询操作，无需写入', 'info'); return; }
-  const { ok, data } = await fetchJSON(API.aiApply, { method: 'POST', body: JSON.stringify({ actions: writes, raw_text: document.getElementById('ai-text').value.trim(), confidence: aiConfidence }) });
-  if (!ok) { toast(data?.detail || '写入失败', 'error'); return; }
-  aiActions = [];
-  toast('AI 操作已写入', 'success');
-  renderAiWorkbench('', data.results);
+async function revertAi(actionId) {
+  if (!actionId) { toast('没有可撤回的操作', 'error'); return; }
+  
+  const { ok, data } = await fetchJSON(`${API.aiRevert}/${actionId}`, { method: 'POST' });
+  if (!ok) {
+    toast(data?.detail || '撤回失败', 'error');
+    return;
+  }
+  
+  toast('已撤回操作', 'success');
+  renderAiWorkbench('', null, null);
 }
 
 // ============ 全局刷新 ============
@@ -893,7 +1119,9 @@ function initRefresh() {
     if (currentTab === 'items') loadItems();
     if (currentTab === 'todos') loadTodos();
     if (currentTab === 'ai') renderAiWorkbench();
+    if (currentTab === 'setup') loadSetup();
   });
+  document.getElementById('settings-btn').addEventListener('click', () => switchTab('setup'));
 }
 
 function initAutoRefresh() {
@@ -909,7 +1137,553 @@ function init() {
   initTabs();
   initRefresh();
   initAutoRefresh();
-  switchTab('devices');
+  loadSetupBanner();
+  preloadDeviceStatus();  // 预加载设备状态
+  switchTab('ai');
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// ============ 设置 Tab ============
+
+async function loadSetup() {
+  await loadSetupStatus();
+  renderSetup();
+}
+
+async function loadSetupStatus() {
+  const { ok, data } = await fetchJSON(API.setupStatus);
+  if (ok) setupStatusData = data;
+  return setupStatusData;
+}
+
+async function loadSetupBanner() {
+  const status = await loadSetupStatus();
+  const existing = document.getElementById('setup-banner');
+  if (!status || !status.missing || !status.missing.length) {
+    if (existing) existing.remove();
+    return;
+  }
+  const header = document.querySelector('header');
+  const html = `<span>⚠️ 配置不完整：${esc(status.missing.join('、'))}</span><button class="btn btn-small btn-primary" id="setup-banner-btn">前往设置</button>`;
+  if (existing) {
+    existing.innerHTML = html;
+  } else {
+    const banner = document.createElement('div');
+    banner.id = 'setup-banner';
+    banner.className = 'setup-banner';
+    banner.innerHTML = html;
+    header.insertAdjacentElement('afterend', banner);
+  }
+  document.getElementById('setup-banner-btn').addEventListener('click', () => switchTab('setup'));
+}
+
+function renderSetup() {
+  const container = document.getElementById('tab-setup');
+  if (!setupStatusData) {
+    container.innerHTML = '<div class="loading">加载配置状态中...</div>';
+    return;
+  }
+  const s = setupStatusData;
+  const statusClass = (ok) => (ok ? 'status-ok' : 'status-missing');
+  const statusText = (ok, label) => `<span class="${statusClass(ok)}">${ok ? '✅' : '❌'} ${label}</span>`;
+  const statusOptional = (ok, label) => ok ? statusText(true, label) : `<span class="status-optional">○ ${label} 未配置</span>`;
+  const showDeviceSetup = !(s.devices_yaml_exists && s.devices_count > 0 && s.xiaomi_cloud_status);
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="section-title">配置总览</div>
+      <div class="setup-status-grid">
+        <div class="setup-status-item">${statusText(s.devices_yaml_exists && s.devices_count > 0, `米家设备 (${s.devices_count})`)}</div>
+        <div class="setup-status-item">${statusText(s.xiaomi_cloud_status, '小米云端凭据')}</div>
+        <div class="setup-status-item">${statusText(s.llm_configured, 'AI 工作台 LLM')}</div>
+        <div class="setup-status-item">${statusOptional(s.smtp_configured, 'SMTP 周报（可选）')}</div>
+        <div class="setup-status-item">${statusOptional(s.kuma_public_url_configured, 'Uptime 跳转（可选）')}</div>
+      </div>
+      ${s.missing && s.missing.length ? `<div class="setup-missing">待处理：${esc(s.missing.join('、'))}</div>` : '<div class="setup-ok">全部配置就绪 🎉</div>'}
+    </div>
+
+    <div class="card ${showDeviceSetup ? '' : 'hidden'}">
+      <div class="section-title">米家设备</div>
+      <div class="setup-help">
+        <b>说明：</b>WiFi 设备需要 host + 32 位 token；BLE Mesh 设备需要 did（可从小米云端登录后获取）。
+        <br>token 获取方式：使用 <code>miiocli discover</code> 或从米家备份中提取。
+      </div>
+      <details class="setup-subsection">
+        <summary>查看已配置设备</summary>
+        <div id="setup-device-list" class="setup-subsection"><div class="loading">加载中...</div></div>
+      </details>
+      <form id="setup-device-form" class="setup-form">
+        <input type="hidden" id="device-edit-name">
+        <div class="form-row">
+          <div class="form-group"><label>名称</label><input type="text" id="device-name" placeholder="客厅灯" required></div>
+          <div class="form-group"><label>类型</label><select id="device-type"><option value="light">灯</option><option value="plug">插座</option><option value="outlet"> outlet</option><option value="airconditioner">空调</option><option value="switch">开关</option><option value="airpurifier">空气净化器</option><option value="other">其他</option></select></div>
+        </div>
+        <div class="form-group"><label>模型 model</label><input type="text" id="device-model" placeholder="yeelink.light.lamp1"></div>
+        <div class="form-row">
+          <div class="form-group"><label>局域网 host（WiFi 设备）</label><input type="text" id="device-host" placeholder="192.168.1.100"></div>
+          <div class="form-group"><label>token（WiFi 设备）</label><input type="text" id="device-token" placeholder="32 位十六进制" maxlength="32"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>云端 did（BLE Mesh 设备）</label><input type="text" id="device-did" placeholder="123456789"></div>
+          <div class="form-group"><label>siid（可选，默认 2）</label><input type="number" id="device-siid" placeholder="2"></div>
+        </div>
+        <div class="form-actions"><button type="submit" class="btn btn-primary">保存设备</button><button type="button" class="btn" id="device-form-reset">重置</button></div>
+      </form>
+    </div>
+
+    <div class="card ${showDeviceSetup ? '' : 'hidden'}">
+      <div class="section-title">小米云端登录</div>
+      <div class="setup-help">用于 BLE Mesh 设备控制。登录成功后凭据保存在 <code>data/xiaomi_cloud.json</code>，不保存密码。</div>
+      <form id="setup-xiaomi-form" class="setup-form">
+        <div class="form-row">
+          <div class="form-group"><label>小米账号</label><input type="text" id="xiaomi-username" placeholder="手机号/邮箱"></div>
+          <div class="form-group"><label>密码</label><input type="password" id="xiaomi-password" placeholder="小米密码"></div>
+        </div>
+        <div id="xiaomi-captcha-box" class="hidden">
+          <div class="form-group"><label>验证码</label><img id="xiaomi-captcha-img" alt="验证码"><input type="text" id="xiaomi-captcha-code" placeholder="输入验证码"></div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" id="xiaomi-login-btn">${xiaomiLoginStateId ? '提交验证码' : '登录'}</button>
+          <button type="button" class="btn" id="xiaomi-test-btn">测试连接</button>
+          <button type="button" class="btn" id="xiaomi-ble-btn">查看 BLE 设备</button>
+        </div>
+        <div id="xiaomi-login-result" class="setup-result"></div>
+      </form>
+      <div id="setup-ble-list" class="setup-subsection"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">监控跳转</div>
+      <form id="setup-app-form" class="setup-form">
+        <div class="form-group"><label>Uptime Kuma 页面地址</label><input type="text" id="kuma-public-url" placeholder="http://127.0.0.1:3001"></div>
+        <div class="form-actions"><button type="submit" class="btn btn-primary">保存</button></div>
+        <div id="app-config-result" class="setup-result"></div>
+      </form>
+    </div>
+
+    <details class="card">
+      <summary class="section-title">AI 工作台配置</summary>
+      <form id="setup-llm-form" class="setup-form">
+        <div class="form-group"><label>Base URL</label><input type="text" id="llm-base-url" placeholder="https://your-openai-compatible/v1"></div>
+        <div class="form-group"><label>API Key</label><input type="password" id="llm-api-key" placeholder="sk-..."></div>
+        <div class="form-row">
+          <div class="form-group"><label>模型</label><input type="text" id="llm-model" placeholder="gpt-4o-mini"></div>
+          <div class="form-group"><label>超时（秒）</label><input type="number" id="llm-timeout" value="30" min="5" max="120"></div>
+        </div>
+        <div id="llm-model-list" class="setup-subsection"></div>
+        <div class="form-row">
+          <div class="form-group"><label><input type="checkbox" id="llm-enabled" checked> 启用 AI 工作台</label></div>
+          <div class="form-group"><label><input type="checkbox" id="llm-confirm" checked> 写入前需确认</label></div>
+          <div class="form-group"><label>最大 actions</label><input type="number" id="llm-max-actions" value="8" min="1" max="20"></div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">保存并测试</button>
+          <button type="button" class="btn" id="llm-test-only-btn">仅测试</button>
+          <button type="button" class="btn" id="llm-models-btn">获取模型列表</button>
+        </div>
+        <div id="llm-result" class="setup-result"></div>
+      </form>
+    </details>
+
+    <details class="card">
+      <summary class="section-title">SMTP 周报配置</summary>
+      <div class="setup-help">保存后写入 <code>data/notify_config.json</code> 并立即生效。QQ 邮箱需使用 SMTP 授权码，不是网页登录密码。</div>
+      <form id="setup-notify-form" class="setup-form">
+        <div class="form-row">
+          <div class="form-group"><label>SMTP Host</label><input type="text" id="smtp-host" placeholder="smtp.qq.com"></div>
+          <div class="form-group"><label>SMTP Port</label><input type="number" id="smtp-port" value="465" min="1" max="65535"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>SMTP 用户</label><input type="text" id="smtp-user" placeholder="your@qq.com"></div>
+          <div class="form-group"><label>SMTP 授权码</label><input type="password" id="smtp-password" placeholder="授权码"></div>
+        </div>
+        <div class="form-group"><label>发件人显示</label><input type="text" id="smtp-from" placeholder="HomeDash <your@qq.com>"></div>
+        <div class="form-group"><label>收件人（英文逗号分隔）</label><input type="text" id="notify-to" placeholder="person-a@example.com,person-b@example.com"></div>
+        <div class="form-row">
+          <div class="form-group"><label><input type="checkbox" id="notify-enabled"> 启用周报接口</label></div>
+          <div class="form-group"><label><input type="checkbox" id="notify-only-need"> 没有待办和需买时跳过</label></div>
+          <div class="form-group"><label>待办最多列出</label><input type="number" id="notify-limit" value="20" min="1" max="100"></div>
+        </div>
+        <div class="form-group"><label>面板公开链接</label><input type="text" id="homedash-public-url" placeholder="http://127.0.0.1:8088"></div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">保存并测试登录</button>
+          <button type="button" class="btn" id="notify-test-only-btn">仅测试 SMTP</button>
+          <button type="button" class="btn" id="notify-send-test-btn">立即发送测试周报</button>
+        </div>
+        <div id="notify-result" class="setup-result"></div>
+      </form>
+    </details>
+
+  `;
+
+  bindSetupEvents();
+  if (showDeviceSetup) loadDeviceList();
+  loadAppConfig();
+  loadLlmConfig();
+  loadNotifyConfig();
+}
+
+function bindSetupEvents() {
+  document.getElementById('setup-device-form').addEventListener('submit', saveSetupDevice);
+  document.getElementById('device-form-reset').addEventListener('click', resetDeviceForm);
+  document.getElementById('setup-xiaomi-form').addEventListener('submit', submitXiaomiLogin);
+  document.getElementById('xiaomi-test-btn').addEventListener('click', testXiaomiCloud);
+  document.getElementById('xiaomi-ble-btn').addEventListener('click', loadBleDevices);
+  document.getElementById('setup-app-form').addEventListener('submit', saveAppConfig);
+  document.getElementById('setup-llm-form').addEventListener('submit', saveLlmConfig);
+  document.getElementById('llm-test-only-btn').addEventListener('click', testLlmConfig);
+  document.getElementById('llm-models-btn').addEventListener('click', loadLlmModels);
+  document.getElementById('setup-notify-form').addEventListener('submit', saveNotifyConfig);
+  document.getElementById('notify-test-only-btn').addEventListener('click', testNotifyConfig);
+  document.getElementById('notify-send-test-btn').addEventListener('click', sendTestNotify);
+}
+
+async function loadDeviceList() {
+  const container = document.getElementById('setup-device-list');
+  const { ok, data } = await fetchJSON(API.setupDevices);
+  if (!ok || !data || !data.length) {
+    container.innerHTML = '<div class="empty-state">暂无设备配置</div>';
+    return;
+  }
+  container.innerHTML = `<div class="setup-list">${data.map((d) => `
+    <div class="setup-list-item">
+      <details class="device-config-detail">
+        <summary><b>${esc(d.name)}</b> <span class="tag">${esc(d.type)}</span></summary>
+        <small>model: ${esc(d.model || '—')}</small><br>
+        <small>${d.host ? `host: ${esc(d.host)}` : `did: ${esc(d.did || '—')}`}</small>
+        ${d.siid ? `<br><small>siid: ${esc(d.siid)}</small>` : ''}
+      </details>
+      <div class="setup-list-actions">
+        <button class="btn btn-small" data-action="edit" data-name="${esc(d.name)}">编辑</button>
+        <button class="btn btn-small btn-danger" data-action="delete" data-name="${esc(d.name)}">删除</button>
+      </div>
+    </div>`).join('')}</div>`;
+  container.querySelectorAll('[data-action="edit"]').forEach((btn) => btn.addEventListener('click', () => editDevice(btn.dataset.name)));
+  container.querySelectorAll('[data-action="delete"]').forEach((btn) => btn.addEventListener('click', () => deleteSetupDevice(btn.dataset.name)));
+}
+
+async function saveSetupDevice(e) {
+  e.preventDefault();
+  const payload = {
+    name: document.getElementById('device-name').value.trim(),
+    original_name: document.getElementById('device-edit-name').value.trim(),
+    type: document.getElementById('device-type').value,
+    model: document.getElementById('device-model').value.trim(),
+    host: document.getElementById('device-host').value.trim(),
+    token: document.getElementById('device-token').value.trim(),
+    did: document.getElementById('device-did').value.trim(),
+    siid: document.getElementById('device-siid').value ? parseInt(document.getElementById('device-siid').value, 10) : null,
+  };
+  const { ok, data } = await fetchJSON(API.setupDevices, { method: 'POST', body: JSON.stringify(payload) });
+  if (!ok) { toast(data?.detail || '保存失败', 'error'); return; }
+  toast('设备已保存', 'success');
+  resetDeviceForm();
+  await loadDeviceList();
+  await refreshSetupOverview();
+}
+
+async function deleteSetupDevice(name) {
+  if (!confirm(`确定删除设备「${name}」？`)) return;
+  const { ok, data } = await fetchJSON(API.setupDevice(name), { method: 'DELETE' });
+  if (!ok) { toast(data?.detail || '删除失败', 'error'); return; }
+  toast('设备已删除', 'success');
+  await loadDeviceList();
+  await refreshSetupOverview();
+}
+
+function editDevice(name) {
+  fetchJSON(API.setupDevices).then(({ ok, data }) => {
+    if (!ok) return;
+    const d = data.find((x) => x.name === name);
+    if (!d) return;
+    document.getElementById('device-name').value = d.name || '';
+    document.getElementById('device-type').value = d.type || 'light';
+    document.getElementById('device-model').value = d.model || '';
+    document.getElementById('device-host').value = d.host || '';
+    document.getElementById('device-token').value = d.token || '';
+    document.getElementById('device-did').value = d.did || '';
+    document.getElementById('device-siid').value = d.siid || '';
+    document.getElementById('device-edit-name').value = d.name || '';
+  });
+}
+
+function resetDeviceForm() {
+  document.getElementById('setup-device-form').reset();
+  document.getElementById('device-edit-name').value = '';
+}
+
+function updateXiaomiLoginButton() {
+  const btn = document.getElementById('xiaomi-login-btn');
+  if (btn) btn.textContent = xiaomiLoginStateId ? '提交验证码' : '登录';
+}
+
+async function refreshSetupOverview() {
+  await loadSetupStatus();
+  await loadSetupBanner();
+  const s = setupStatusData;
+  if (!s) return;
+  const grid = document.querySelector('.setup-status-grid');
+  if (!grid) return;
+  const statusText = (ok, label) => `<span class="${ok ? 'status-ok' : 'status-missing'}">${ok ? '✅' : '❌'} ${label}</span>`;
+  const statusOptional = (ok, label) => ok ? statusText(true, label) : `<span class="status-optional">○ ${label} 未配置</span>`;
+  grid.innerHTML = `
+    <div class="setup-status-item">${statusText(s.devices_yaml_exists && s.devices_count > 0, `米家设备 (${s.devices_count})`)}</div>
+    <div class="setup-status-item">${statusText(s.xiaomi_cloud_status, '小米云端凭据')}</div>
+    <div class="setup-status-item">${statusText(s.llm_configured, 'AI 工作台 LLM')}</div>
+    <div class="setup-status-item">${statusOptional(s.smtp_configured, 'SMTP 周报（可选）')}</div>
+    <div class="setup-status-item">${statusOptional(s.kuma_public_url_configured, 'Uptime 跳转（可选）')}</div>`;
+  const missing = document.querySelector('.setup-missing, .setup-ok');
+  if (missing) {
+    if (s.missing && s.missing.length) {
+      missing.className = 'setup-missing';
+      missing.textContent = `待处理：${s.missing.join('、')}`;
+    } else {
+      missing.className = 'setup-ok';
+      missing.textContent = '全部配置就绪 🎉';
+    }
+  }
+}
+
+async function submitXiaomiLogin(e) {
+  e.preventDefault();
+  const btn = document.getElementById('xiaomi-login-btn');
+  const resultBox = document.getElementById('xiaomi-login-result');
+  const captchaBox = document.getElementById('xiaomi-captcha-box');
+  const captchaImg = document.getElementById('xiaomi-captcha-img');
+
+  btn.disabled = true;
+  try {
+    if (xiaomiLoginStateId) {
+      const { ok, data } = await fetchJSON(API.setupXiaomiStep2, {
+        method: 'POST',
+        body: JSON.stringify({
+          state_id: xiaomiLoginStateId,
+          captcha_code: document.getElementById('xiaomi-captcha-code').value.trim(),
+          username: document.getElementById('xiaomi-username').value.trim(),
+          password: document.getElementById('xiaomi-password').value,
+        }),
+      });
+      if (!ok) { resultBox.textContent = data?.detail || '登录失败'; resultBox.className = 'setup-result error'; return; }
+      if (data.status === 'success') {
+        xiaomiLoginStateId = null;
+        captchaBox.classList.add('hidden');
+        resultBox.textContent = `登录成功，userId=${data.user_id}`;
+        resultBox.className = 'setup-result success';
+        updateXiaomiLoginButton();
+        await refreshSetupOverview();
+      } else if (data.status === 'captcha_required') {
+        xiaomiLoginStateId = data.state_id;
+        captchaImg.src = data.captcha_base64;
+        captchaBox.classList.remove('hidden');
+        resultBox.textContent = data.message || '需要验证码';
+        resultBox.className = 'setup-result';
+        updateXiaomiLoginButton();
+      }
+    } else {
+      const { ok, data } = await fetchJSON(API.setupXiaomiStep1, {
+        method: 'POST',
+        body: JSON.stringify({
+          username: document.getElementById('xiaomi-username').value.trim(),
+          password: document.getElementById('xiaomi-password').value,
+        }),
+      });
+      if (!ok) { resultBox.textContent = data?.detail || '登录失败'; resultBox.className = 'setup-result error'; return; }
+      if (data.status === 'success') {
+        resultBox.textContent = `登录成功，userId=${data.user_id}`;
+        resultBox.className = 'setup-result success';
+        await refreshSetupOverview();
+      } else if (data.status === 'captcha_required') {
+        xiaomiLoginStateId = data.state_id;
+        captchaImg.src = data.captcha_base64;
+        captchaBox.classList.remove('hidden');
+        resultBox.textContent = data.message || '需要验证码';
+        resultBox.className = 'setup-result';
+        updateXiaomiLoginButton();
+      }
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function testXiaomiCloud() {
+  const resultBox = document.getElementById('xiaomi-login-result');
+  resultBox.textContent = '测试中...';
+  const { ok, data } = await fetchJSON(API.setupXiaomiTest, { method: 'POST' });
+  resultBox.textContent = data?.message || (ok ? '连接正常' : '连接失败');
+  resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
+}
+
+async function loadBleDevices() {
+  const container = document.getElementById('setup-ble-list');
+  container.innerHTML = '<div class="loading">加载中...</div>';
+  const { ok, data } = await fetchJSON(API.setupBleDevices);
+  if (!ok) { container.innerHTML = '<div class="empty-state">加载失败</div>'; return; }
+  if (!data || !data.length) { container.innerHTML = '<div class="empty-state">暂无 BLE 设备记录，请先登录小米云端</div>'; return; }
+  container.innerHTML = `<div class="setup-list">${data.map((d) => `
+    <div class="setup-list-item">
+      <div><b>${esc(d.name)}</b> <small>did=${esc(d.did)}</small><br><small>model=${esc(d.model)}</small></div>
+      <button class="btn btn-small" data-did="${esc(d.did)}" data-name="${esc(d.name)}" data-model="${esc(d.model)}">填入</button>
+    </div>`).join('')}</div>`;
+  container.querySelectorAll('button[data-did]').forEach((btn) => btn.addEventListener('click', () => {
+    document.getElementById('device-name').value = btn.dataset.name;
+    document.getElementById('device-did').value = btn.dataset.did;
+    document.getElementById('device-model').value = btn.dataset.model;
+    document.getElementById('device-type').value = 'light';
+    toast('已填入设备表单', 'info');
+  }));
+}
+
+async function loadAppConfig() {
+  const { ok, data } = await fetchJSON(API.setupAppConfig);
+  if (!ok || !data) return;
+  document.getElementById('kuma-public-url').value = data.kuma_public_url || '';
+}
+
+async function saveAppConfig(e) {
+  e.preventDefault();
+  const resultBox = document.getElementById('app-config-result');
+  const payload = { kuma_public_url: document.getElementById('kuma-public-url').value.trim() };
+  const { ok, data } = await fetchJSON(API.setupAppSave, { method: 'POST', body: JSON.stringify(payload) });
+  if (!ok) {
+    resultBox.textContent = data?.detail || '保存失败';
+    resultBox.className = 'setup-result error';
+    return;
+  }
+  resultBox.textContent = '监控跳转地址已保存';
+  resultBox.className = 'setup-result success';
+  await refreshSetupOverview();
+}
+
+async function loadLlmConfig() {
+  const { ok, data } = await fetchJSON(API.setupLlmConfig);
+  if (!ok || !data) return;
+  document.getElementById('llm-base-url').value = data.base_url || '';
+  document.getElementById('llm-api-key').value = data.api_key || '';
+  document.getElementById('llm-model').value = data.model || '';
+  document.getElementById('llm-timeout').value = data.timeout_sec || 30;
+  document.getElementById('llm-enabled').checked = data.enabled !== false;
+  document.getElementById('llm-confirm').checked = data.confirm_required !== false;
+  document.getElementById('llm-max-actions').value = data.max_actions || 8;
+}
+
+async function saveLlmConfig(e) {
+  e.preventDefault();
+  const payload = {
+    base_url: document.getElementById('llm-base-url').value.trim(),
+    api_key: document.getElementById('llm-api-key').value.trim(),
+    model: document.getElementById('llm-model').value.trim(),
+    timeout_sec: parseFloat(document.getElementById('llm-timeout').value) || 30,
+    enabled: document.getElementById('llm-enabled').checked,
+    confirm_required: document.getElementById('llm-confirm').checked,
+    max_actions: parseInt(document.getElementById('llm-max-actions').value, 10) || 8,
+  };
+  const { ok, data } = await fetchJSON(API.setupLlmSave, { method: 'POST', body: JSON.stringify(payload) });
+  const resultBox = document.getElementById('llm-result');
+  if (!ok) {
+    resultBox.textContent = data?.detail || '保存失败';
+    resultBox.className = 'setup-result error';
+    return;
+  }
+  resultBox.textContent = data.message || (data.tested ? '保存成功，连接正常' : '保存成功，但连接测试失败');
+  resultBox.className = `setup-result ${data.tested ? 'success' : 'warning'}`;
+  await refreshSetupOverview();
+}
+
+async function testLlmConfig() {
+  const payload = {
+    base_url: document.getElementById('llm-base-url').value.trim(),
+    api_key: document.getElementById('llm-api-key').value.trim(),
+    model: document.getElementById('llm-model').value.trim(),
+    timeout_sec: parseFloat(document.getElementById('llm-timeout').value) || 30,
+  };
+  const resultBox = document.getElementById('llm-result');
+  resultBox.textContent = '测试中...';
+  const { ok, data } = await fetchJSON(API.setupLlmTest, { method: 'POST', body: JSON.stringify(payload) });
+  resultBox.textContent = data?.message || (ok ? '连接正常' : '连接失败');
+  resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
+}
+
+async function loadLlmModels() {
+  const box = document.getElementById('llm-model-list');
+  box.innerHTML = '<div class="loading">获取模型列表中...</div>';
+  const { ok, data } = await fetchJSON(API.setupLlmModels);
+  if (!ok || !data?.ok || !data.models?.length) {
+    box.innerHTML = `<div class="setup-result error">${esc(data?.message || data?.detail || '无法获取模型列表')}</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="setup-list">${data.models.map((model) => `
+    <button type="button" class="btn btn-small llm-model-choice" data-model="${esc(model)}">${esc(model)}</button>
+  `).join('')}</div>`;
+  box.querySelectorAll('.llm-model-choice').forEach((btn) => btn.addEventListener('click', () => {
+    document.getElementById('llm-model').value = btn.dataset.model;
+    toast(`已选择模型 ${btn.dataset.model}`, 'success');
+  }));
+}
+
+async function loadNotifyConfig() {
+  const { ok, data } = await fetchJSON(API.setupNotifyConfig);
+  if (!ok || !data) return;
+  document.getElementById('smtp-host').value = data.smtp_host || '';
+  document.getElementById('smtp-port').value = data.smtp_port || 465;
+  document.getElementById('smtp-user').value = data.smtp_user || '';
+  document.getElementById('smtp-password').value = data.smtp_password || '';
+  document.getElementById('smtp-from').value = data.smtp_from || '';
+  document.getElementById('notify-to').value = data.notify_to || '';
+  document.getElementById('notify-enabled').checked = data.notify_enabled === true;
+  document.getElementById('notify-only-need').checked = data.notify_only_when_need_buy === true;
+  document.getElementById('notify-limit').value = data.notify_todo_limit || 20;
+  document.getElementById('homedash-public-url').value = data.homedash_public_url || '';
+}
+
+function notifyPayload() {
+  return {
+    smtp_host: document.getElementById('smtp-host').value.trim(),
+    smtp_port: parseInt(document.getElementById('smtp-port').value, 10) || 465,
+    smtp_user: document.getElementById('smtp-user').value.trim(),
+    smtp_password: document.getElementById('smtp-password').value.trim(),
+    smtp_from: document.getElementById('smtp-from').value.trim(),
+    notify_to: document.getElementById('notify-to').value.trim(),
+    notify_enabled: document.getElementById('notify-enabled').checked,
+    notify_only_when_need_buy: document.getElementById('notify-only-need').checked,
+    notify_todo_limit: parseInt(document.getElementById('notify-limit').value, 10) || 20,
+    homedash_public_url: document.getElementById('homedash-public-url').value.trim(),
+  };
+}
+
+async function saveNotifyConfig(e) {
+  e.preventDefault();
+  const resultBox = document.getElementById('notify-result');
+  resultBox.textContent = '保存并测试中...';
+  const { ok, data } = await fetchJSON(API.setupNotifySave, { method: 'POST', body: JSON.stringify(notifyPayload()) });
+  if (!ok) {
+    resultBox.textContent = data?.detail || '保存失败';
+    resultBox.className = 'setup-result error';
+    return;
+  }
+  resultBox.textContent = data.message || (data.tested ? '保存成功，SMTP 登录正常' : '保存成功，但 SMTP 登录失败');
+  resultBox.className = `setup-result ${data.tested ? 'success' : 'warning'}`;
+  await refreshSetupOverview();
+}
+
+async function testNotifyConfig() {
+  const resultBox = document.getElementById('notify-result');
+  resultBox.textContent = '测试中...';
+  const { ok, data } = await fetchJSON(API.setupNotifyTest, { method: 'POST', body: JSON.stringify(notifyPayload()) });
+  resultBox.textContent = data?.message || (ok ? 'SMTP 正常' : 'SMTP 失败');
+  resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
+}
+
+async function sendTestNotify() {
+  const resultBox = document.getElementById('notify-result');
+  resultBox.textContent = '发送测试周报中...';
+  const { ok, data } = await fetchJSON(API.notifyTest, { method: 'POST' });
+  if (!ok) {
+    resultBox.textContent = data?.detail || '发送失败';
+    resultBox.className = 'setup-result error';
+    return;
+  }
+  resultBox.textContent = data.sent ? `已发送：待办 ${data.todo_count} 项，需买 ${data.buy_count} 项` : (data.reason || '未发送');
+  resultBox.className = `setup-result ${data.sent ? 'success' : 'warning'}`;
+}
