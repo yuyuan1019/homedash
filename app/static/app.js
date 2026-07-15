@@ -19,6 +19,8 @@ const API = {
   todoReopen: (id) => `/api/todos/${id}/reopen`,
   aiParse: '/api/ai/parse',
   aiApply: '/api/ai/apply',
+  aiRevert: '/api/ai/revert',
+  aiAudit: '/api/ai/audit',
   aiItemCategory: '/api/ai/item-category',
   setupStatus: '/api/setup/status',
   setupDevices: '/api/setup/devices',
@@ -962,18 +964,19 @@ async function deleteTodo(id) {
 // ============ AI 工作台 Tab ============
 
 function actionLabel(action) {
+  const name = action.name || action.item_name || '';
   const labels = {
-    'item.purchase': `购买 ${action.amount} ${action.unit || ''} ${action.name || ''}`,
-    'item.usage': `消耗 ${action.amount} ${action.unit || ''} ${action.name || ''}`,
-    'item.set_stock': `盘点 ${action.name || ''} 库存为 ${action.current_stock}`,
-    'item.create': `新建物品 ${action.name || ''}`,
+    'item.purchase': `购买 ${action.amount} ${action.unit || ''} ${name}`,
+    'item.usage': `消耗 ${action.amount} ${action.unit || ''} ${name}`,
+    'item.set_stock': `盘点 ${name} 库存为 ${action.current_stock}`,
+    'item.create': `新建物品 ${name}`,
     'todo.create': `新建待办 ${action.title || ''}`,
     'todo.complete': `完成待办 #${action.todo_id || ''}`,
     'todo.reopen': `重开待办 #${action.todo_id || ''}`,
     'todo.update': `更新待办 #${action.todo_id || ''}`,
     'todo.delete': `删除待办 #${action.todo_id || ''}`,
     'query.need_buy': '查询需要购买的日用品',
-    'query.items': `查询库存 ${action.name || ''}`,
+    'query.items': `查询库存 ${name}`,
     'query.open_todos': '查询未完成待办',
     'query.overdue_todos': '查询过期待办',
   };
@@ -1004,6 +1007,8 @@ function renderAiWorkbench(message = '', results = null, lastActionId = null) {
         <div class="ai-loading-text">思考中...</div>
       </div>
       <div id="ai-response"></div>${resultText}${revertButton}
+      <div class="section-title" style="margin-top:1.5rem;">操作溯源</div>
+      <div id="ai-audit-list" class="audit-list"><div class="empty-state">加载中...</div></div>
     </div>`;
   document.querySelectorAll('.ai-chip').forEach((button) => button.addEventListener('click', () => {
     document.getElementById('ai-text').value = button.textContent;
@@ -1012,6 +1017,64 @@ function renderAiWorkbench(message = '', results = null, lastActionId = null) {
   if (lastActionId) {
     document.getElementById('ai-revert').addEventListener('click', () => revertAi(lastActionId));
   }
+  loadAuditList();
+}
+
+function renderAuditRow(r) {
+  const stageLabel = r.stage === 'parse' ? '解析' : '执行';
+  const okBadge = r.ok
+    ? '<span class="badge">成功</span>'
+    : '<span class="badge" style="background:var(--down);color:#fff">失败</span>';
+  const revertedTag = r.reverted ? '<span class="badge badge-outline">已撤回</span>' : '';
+  const model = r.llm_model ? `<span style="color:var(--muted)">${esc(r.llm_model)}</span>` : '';
+  const dur = r.duration_ms != null ? `${r.duration_ms}ms` : '';
+  const reply = r.llm_reply ? `<div style="color:var(--muted);font-size:0.85rem;margin-top:0.2rem">回复：${esc(r.llm_reply)}</div>` : '';
+  const err = r.error ? `<div style="color:var(--down);font-size:0.85rem;margin-top:0.2rem">错误：${esc(r.error)}</div>` : '';
+  let actionsHtml = '';
+  try {
+    const acts = JSON.parse(r.actions_json || '[]');
+    actionsHtml = acts.map((a) => `<div class="history-item">${actionLabel(a)}</div>`).join('');
+  } catch { /* ponytail: 旧记录解析失败即忽略 */ }
+  let beforeAfter = '';
+  try {
+    const before = JSON.parse(r.before_json || '[]');
+    const after = JSON.parse(r.after_json || '[]');
+    const parts = before.map((b, i) => {
+      const a = after[i] || {};
+      const bRow = b.row ? `前:${esc(b.row.name || '')}=${fmtNumber(b.row.current_stock)}` : '前:无';
+      const aRow = a.row ? `后:${esc(a.row.name || '')}=${fmtNumber(a.row.current_stock)}` : '后:已删';
+      return `<span style="color:var(--muted);font-size:0.8rem">${bRow} → ${aRow}</span>`;
+    });
+    beforeAfter = parts.join('<br>');
+  } catch { /* ignore */ }
+  const revertBtn = (r.stage !== 'parse' && r.ok && !r.reverted)
+    ? `<button class="btn btn-small" data-revert="${r.id}">撤回</button>` : '';
+  return `
+    <div class="audit-row" style="border-bottom:1px solid var(--border);padding:0.6rem 0;">
+      <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+        <strong>#${r.id}</strong> ${okBadge} <span class="badge badge-outline">${stageLabel}</span> ${revertedTag}
+        <span style="color:var(--muted);font-size:0.8rem;margin-left:auto">${esc(r.created_at || '')} ${model} ${dur}</span>
+        ${revertBtn}
+      </div>
+      <div style="font-size:0.85rem;margin-top:0.2rem">${esc(r.raw_text || '')}</div>
+      ${reply}${err}
+      ${actionsHtml ? `<div style="margin-top:0.3rem">${actionsHtml}</div>` : ''}
+      ${beforeAfter ? `<div style="margin-top:0.2rem">${beforeAfter}</div>` : ''}
+    </div>`;
+}
+
+async function loadAuditList() {
+  const el = document.getElementById('ai-audit-list');
+  if (!el) return;
+  const { ok, data } = await fetchJSON(API.aiAudit);
+  if (!ok || !Array.isArray(data) || !data.length) {
+    el.innerHTML = '<div class="empty-state">暂无溯源记录</div>';
+    return;
+  }
+  el.innerHTML = data.map(renderAuditRow).join('');
+  el.querySelectorAll('button[data-revert]').forEach((btn) => {
+    btn.addEventListener('click', () => revertAi(Number(btn.dataset.revert)));
+  });
 }
 
 function formatResultsForUser(results) {
@@ -1042,21 +1105,21 @@ async function parseAi() {
   const text = document.getElementById('ai-text').value.trim();
   if (!text) { toast('请输入指令', 'error'); return; }
   
-  // 显示加载动画
   document.getElementById('ai-loading').style.display = 'flex';
   document.getElementById('ai-parse').disabled = true;
+  const sessionId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
   
   try {
-    const { ok, data } = await fetchJSON(API.aiParse, { method: 'POST', body: JSON.stringify({ text }) });
+    const { ok, data } = await fetchJSON(API.aiParse, { method: 'POST', body: JSON.stringify({ text, session_id: sessionId }) });
     if (!ok) { 
-      toast(data?.detail || 'AI 解析失败', 'error'); 
+      toast(data?.detail || 'AI 解析失败', 'error');
+      loadAuditList();
       return; 
     }
     
     aiActions = data.actions || [];
     aiConfidence = data.confidence || 'low';
     
-    // 自动执行写操作，不显示确认界面
     const writes = aiActions.filter((action) => !action.op.startsWith('query.'));
     if (writes.length > 0) {
       const applyResult = await fetchJSON(API.aiApply, { 
@@ -1064,7 +1127,8 @@ async function parseAi() {
         body: JSON.stringify({ 
           actions: writes, 
           raw_text: text, 
-          confidence: aiConfidence 
+          confidence: aiConfidence,
+          session_id: sessionId
         }) 
       });
       
@@ -1072,15 +1136,14 @@ async function parseAi() {
         const actionId = applyResult.data?.action_id || null;
         renderAiWorkbench('', applyResult.data?.results || data.read_results, actionId);
         
-        // 显示友好结果
         const response = document.getElementById('ai-response');
         response.textContent = data.reply || '操作已完成。';
         response.className = 'ai-reply';
       } else {
         toast(applyResult.data?.detail || '执行失败', 'error');
+        loadAuditList();
       }
     } else {
-      // 只有查询操作
       renderAiWorkbench('', data.read_results);
       const response = document.getElementById('ai-response');
       response.textContent = data.reply || '查询完成。';
@@ -1088,6 +1151,7 @@ async function parseAi() {
     }
   } catch (e) {
     toast('请求失败', 'error');
+    loadAuditList();
   } finally {
     document.getElementById('ai-loading').style.display = 'none';
     document.getElementById('ai-parse').disabled = false;

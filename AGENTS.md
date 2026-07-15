@@ -153,10 +153,11 @@ python -m app.modules.uptime
 | `app/modules/items.py` | ✅ | 日用品 + EWMA / 安全库存预测 |
 | `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API |
 | `app/modules/notify.py` | ✅ | SMTP 周报（库存 + 重点待办） |
-| `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、审计 |
-| `app/modules/ai_executor.py` | ✅ | 白名单写库 |
-| `app/database.py` | ✅ | 单例 DB；规划扩 todos/ai_audit |
-| `app/static/*` | ✅ 四 Tab | 米家浅色：设备、监控、日用品、重点待办；规划加「AI」 |
+| `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、字段归一、全流程审计（parse/apply 成败均落库 + before/after 快照） |
+| `app/modules/ai_executor.py` | ✅ | 白名单写库；`_item_name` 归一 name/item_name |
+| `app/modules/setup.py` | ✅ | 配置状态、米家设备/云端登录、LLM 配置 |
+| `app/database.py` | ✅ | 单例 DB；`_ensure_columns` 给旧库容错补列 |
+| `app/static/*` | ✅ 六 Tab | 米家浅色：设备、监控、日用品、重点待办、AI、设置 |
 
 ## 架构要点（非看文件不可知）
 

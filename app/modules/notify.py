@@ -1,9 +1,11 @@
 """SMTP 周报：汇总重点待办和需购买日用品，支持手动试发。"""
 import asyncio
+import json
 import os
 import smtplib
 from datetime import date
 from email.message import EmailMessage
+from email.utils import parseaddr
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -11,24 +13,54 @@ from app.database import get_db
 from app.modules import items, todos
 
 router = APIRouter()
+NOTIFY_CONFIG_FILE = "data/notify_config.json"
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _file_config() -> dict:
+    if not os.path.isfile(NOTIFY_CONFIG_FILE):
+        return {}
+    try:
+        with open(NOTIFY_CONFIG_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _cfg(name: str, default=""):
+    return os.getenv(name, "") or _file_config().get(name.lower(), default)
+
+
+def _int_cfg(name: str, default: int) -> int:
+    try:
+        return int(_cfg(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _recipients() -> list[str]:
-    return [address.strip() for address in os.getenv("NOTIFY_TO", "").split(",") if address.strip()]
+    value = _cfg("NOTIFY_TO", "")
+    if isinstance(value, list):
+        return [address.strip() for address in value if str(address).strip()]
+    return [address.strip() for address in str(value).split(",") if address.strip()]
+
+
+def _email_address(value: str) -> str:
+    address = parseaddr(value)[1]
+    return address if "@" in address else ""
 
 
 def _smtp_config() -> dict:
-    host = os.getenv("SMTP_HOST", "").strip()
-    user = os.getenv("SMTP_USER", "").strip()
-    password = os.getenv("SMTP_PASSWORD", "")
-    sender = os.getenv("SMTP_FROM", "").strip() or user
+    host = str(_cfg("SMTP_HOST", "")).strip()
+    user = str(_cfg("SMTP_USER", "")).strip()
+    password = str(_cfg("SMTP_PASSWORD", ""))
+    sender = str(_cfg("SMTP_FROM", "")).strip() or user
     recipients = _recipients()
     try:
-        port = int(os.getenv("SMTP_PORT", "465"))
+        port = _int_cfg("SMTP_PORT", 465)
     except ValueError as exc:
         raise HTTPException(400, "SMTP_PORT 必须是端口数字") from exc
     if not host or not user or not password:
@@ -41,6 +73,7 @@ def _smtp_config() -> dict:
         "user": user,
         "password": password,
         "sender": sender,
+        "envelope_sender": _email_address(sender) or user,
         "recipients": recipients,
     }
 
@@ -78,14 +111,14 @@ def _render_report(open_todos: list[dict], need_buy: list[dict], total_open: int
     else:
         lines.append("- 暂无需要购买的日用品")
 
-    public_url = os.getenv("HOMEDASH_PUBLIC_URL", "").strip()
+    public_url = str(_cfg("HOMEDASH_PUBLIC_URL", "")).strip()
     if public_url:
         lines.extend(["", f"打开面板：{public_url}"])
     return subject, "\n".join(lines)
 
 
 async def _weekly_content(db) -> tuple[str, str, int, int]:
-    limit = max(1, int(os.getenv("NOTIFY_TODO_LIMIT", "20")))
+    limit = max(1, _int_cfg("NOTIFY_TODO_LIMIT", 20))
     open_todos = await todos.list_open_todos(db, limit=limit)
     cur = await db.execute("SELECT COUNT(*) AS count FROM todos WHERE status='open'")
     total_open = (await cur.fetchone())["count"]
@@ -114,7 +147,7 @@ def _send_sync(config: dict, subject: str, body: str) -> None:
             client.starttls()
         with client:
             client.login(config["user"], config["password"])
-            client.send_message(message, to_addrs=config["recipients"])
+            client.send_message(message, from_addr=config["envelope_sender"], to_addrs=config["recipients"])
     except smtplib.SMTPException as exc:
         raise RuntimeError(f"SMTP 发送失败: {exc}") from exc
     except OSError as exc:
@@ -124,9 +157,11 @@ def _send_sync(config: dict, subject: str, body: str) -> None:
 async def _send_weekly(db, ignore_enabled: bool = False) -> dict:
     config = _smtp_config()
     subject, body, todo_count, buy_count = await _weekly_content(db)
-    if not ignore_enabled and not _bool_env("NOTIFY_ENABLED"):
+    enabled = str(_cfg("NOTIFY_ENABLED", os.getenv("NOTIFY_ENABLED", "false"))).lower() in {"1", "true", "yes", "on"}
+    if not ignore_enabled and not enabled:
         return {"sent": False, "reason": "周报发送已关闭", "todo_count": todo_count, "buy_count": buy_count}
-    if _bool_env("NOTIFY_ONLY_WHEN_NEED_BUY") and not todo_count and not buy_count:
+    only_when_needed = str(_cfg("NOTIFY_ONLY_WHEN_NEED_BUY", os.getenv("NOTIFY_ONLY_WHEN_NEED_BUY", "false"))).lower() in {"1", "true", "yes", "on"}
+    if only_when_needed and not todo_count and not buy_count:
         return {"sent": False, "reason": "暂无待办和需购物品", "todo_count": 0, "buy_count": 0}
     try:
         await asyncio.to_thread(_send_sync, config, subject, body)
@@ -142,12 +177,15 @@ async def _send_weekly(db, ignore_enabled: bool = False) -> dict:
 
 @router.get("/notify/config")
 async def notify_config():
+    cfg = _file_config()
+    source = "env" if os.getenv("SMTP_HOST") else "file" if cfg else "none"
     return {
-        "enabled": _bool_env("NOTIFY_ENABLED"),
-        "has_smtp": bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("SMTP_PASSWORD")),
+        "enabled": str(_cfg("NOTIFY_ENABLED", "false")).lower() in {"1", "true", "yes", "on"},
+        "has_smtp": bool(_cfg("SMTP_HOST") and _cfg("SMTP_USER") and _cfg("SMTP_PASSWORD")),
         "to_count": len(_recipients()),
-        "host": os.getenv("SMTP_HOST", "").strip(),
-        "port": os.getenv("SMTP_PORT", "").strip(),
+        "host": str(_cfg("SMTP_HOST", "")).strip(),
+        "port": str(_cfg("SMTP_PORT", "")).strip(),
+        "source": source,
     }
 
 

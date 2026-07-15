@@ -678,6 +678,8 @@ curl -s -X POST http://127.0.0.1:8088/api/agent/todos/1/remind-fired \
 
 **完成情况（2026-07-13）**：已新增 `ai_workbench.py`、`ai_executor.py`、`ai_audit` 表和第五个「AI 工作台」Tab。LLM 仅输出经服务端校验的白名单 JSON；`apply` 仅调用 items/todos 领域函数，禁止任意 SQL 与设备控制。LLM 未配置或 `AI_ENABLED=false` 时 API 优雅拒绝，不影响应用启动。
 
+**加固（2026-07-15）**：修复字段名不归一导致的空名物品创建 bug（LLM 输出 `item_name` 时执行器只读 `name`，建出 `name=''` 物品）。①`_validate` 将 `item_name` 归一为 `name`，并对 purchase/usage/set_stock/update 强制校验物品标识；②`create_item_record` 拒绝空名；③prompt 显式约定字段名为 `name`。同时补齐全流程审计：parse 与 apply **成败均落 `ai_audit`**，新增 `stage/session_id/llm_model/llm_reply/confidence/duration_ms/error/before_json/after_json` 列（`_ensure_columns` 给旧库容错补列），前端新增「操作溯源」视图按 session 串联展示。已修复历史空名物品（id=22 改名「卫生间纸巾」+ 补分类「纸品」）。
+
 **难度**：★★★★☆  
 **定位（已定）**：不是「仅语音记一笔库存」，而是面板上的 **AI 工作台**：用户用**打字或语音**下指令，大模型理解后生成**白名单结构化动作**，由 HomeDash **校验并写 SQLite**（库存、待办等）。  
 **一句话**：人话操作数据库的工作台；**LLM 从不直接执行 SQL**。

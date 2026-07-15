@@ -46,6 +46,12 @@ _devices: dict[str, dict] = {}
 _cloud = None  # MiCloud 单例
 
 
+def reset_cloud() -> None:
+    """强制下次请求重新初始化 MiCloud 单例（凭据更新后调用）。"""
+    global _cloud
+    _cloud = None
+
+
 def _get_cloud():
     """获取或初始化 MiCloud 单例（优先用 data/xiaomi_cloud.json 凭据）。"""
     global _cloud
@@ -85,12 +91,8 @@ def _cloud_miot_set(did: str, siid: int, piid: int, value, country: str = "cn"):
     try:
         result = cloud.request_country("/miotspec/prop/set", country, params)
     except Exception as e:
-        # token 过期时尝试重新登录一次
-        try:
-            cloud.login()
-            result = cloud.request_country("/miotspec/prop/set", country, params)
-        except Exception:
-            raise HTTPException(503, f"云端控制失败: {e}")
+        reset_cloud()
+        raise HTTPException(503, f"云端控制失败，请到设置页重新登录小米云端: {e}")
     if result is None:
         raise HTTPException(503, "云端返回空结果")
     return result
@@ -105,7 +107,8 @@ def _cloud_miot_get(did: str, siid: int, piid: int, country: str = "cn"):
     try:
         return cloud.request_country("/miotspec/prop/get", country, {"data": json.dumps(payload)})
     except Exception as e:
-        raise HTTPException(503, f"云端状态查询失败: {e}")
+        reset_cloud()
+        raise HTTPException(503, f"云端状态查询失败，请到设置页重新登录小米云端: {e}")
 
 
 # ============ 设备加载 ============
@@ -226,11 +229,16 @@ async def _devices_with_visibility(db, include_hidden: bool) -> list[dict]:
 
 
 def _serialize_devices(hidden_names: set[str], include_hidden: bool) -> list[dict]:
-    return [
-        {**{key: value for key, value in cfg.items() if not key.startswith("_")}, "hidden": cfg["name"] in hidden_names}
-        for cfg in _devices.values()
-        if include_hidden or cfg["name"] not in hidden_names
-    ]
+    out = []
+    for cfg in _devices.values():
+        if not include_hidden and cfg["name"] in hidden_names:
+            continue
+        item = {key: value for key, value in cfg.items() if not key.startswith("_")}
+        if item.get("token"):
+            item["token"] = item["token"][:4] + "*" * 24 + item["token"][-4:]
+        item["hidden"] = cfg["name"] in hidden_names
+        out.append(item)
+    return out
 
 
 @router.on_event("startup")

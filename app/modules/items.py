@@ -33,6 +33,8 @@ class ItemIn(BaseModel):
     unit: str = "个"
     current_stock: float = 0
     min_stock: float = 1
+    location: Optional[str] = None
+    expires_at: Optional[str] = None
 
 
 class ItemPatch(BaseModel):
@@ -41,6 +43,8 @@ class ItemPatch(BaseModel):
     unit: Optional[str] = None
     current_stock: Optional[float] = None
     min_stock: Optional[float] = None
+    location: Optional[str] = None
+    expires_at: Optional[str] = None
 
 
 class UsageIn(BaseModel):
@@ -187,10 +191,14 @@ async def _get_item(db, item_id: int):
 
 
 async def create_item_record(db, data: dict) -> int:
+    name = str(data.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "物品名称不能为空")
     cur = await db.execute(
-        "INSERT INTO items(name,category,unit,current_stock,min_stock) VALUES(?,?,?,?,?)",
-        (data["name"].strip(), data.get("category"), data.get("unit") or "个",
-         data.get("current_stock", 0), data.get("min_stock", 1)),
+        "INSERT INTO items(name,category,unit,current_stock,min_stock,location,expires_at) VALUES(?,?,?,?,?,?,?)",
+        (name, data.get("category"), data.get("unit") or "个",
+         data.get("current_stock", 0), data.get("min_stock", 1),
+         data.get("location"), data.get("expires_at")),
     )
     await db.commit()
     return cur.lastrowid
@@ -229,7 +237,7 @@ async def set_item_stock(db, item_id: int, current_stock: float) -> dict:
 
 async def update_item_record(db, item_id: int, fields: dict) -> dict:
     await _get_item(db, item_id)
-    allowed = {key: fields[key] for key in ("name", "unit", "category", "min_stock") if key in fields}
+    allowed = {key: fields[key] for key in ("name", "unit", "category", "min_stock", "location", "expires_at") if key in fields}
     if not allowed:
         raise HTTPException(400, "无更新字段")
     sets = ", ".join(f"{key}=?" for key in allowed)
@@ -260,6 +268,11 @@ async def list_items(db=Depends(get_db)):
 @router.post("/items")
 async def create_item(payload: ItemIn, db=Depends(get_db)):
     return {"id": await create_item_record(db, payload.model_dump())}
+
+
+@router.get("/items/{item_id}")
+async def get_item(item_id: int, db=Depends(get_db)):
+    return await _item_with_prediction(db, await _get_item(db, item_id))
 
 
 @router.put("/items/{item_id}")

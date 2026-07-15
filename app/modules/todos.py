@@ -121,6 +121,16 @@ def _message(todo: dict) -> str:
     return f"{message}\n{todo['note']}" if todo.get("note") else message
 
 
+def _next_remind_at(remind_at: datetime, repeat: str, now: datetime) -> datetime | None:
+    if repeat not in {"daily", "weekly"}:
+        return None
+    step = timedelta(days=1 if repeat == "daily" else 7)
+    next_at = remind_at + step
+    while next_at <= now:
+        next_at += step
+    return next_at
+
+
 async def _get_todo(db, todo_id: int):
     cur = await db.execute("SELECT * FROM todos WHERE id=?", (todo_id,))
     row = await cur.fetchone()
@@ -329,12 +339,7 @@ async def remind_fired(todo_id: int, payload: RemindFiredIn, db=Depends(get_db))
         raise HTTPException(400, "提醒频道不匹配")
     remind_at = _parse_datetime(todo["remind_at"], "remind_at")
     repeat = todo["remind_repeat"] or "none"
-    if repeat == "daily":
-        next_remind_at = remind_at + timedelta(days=1)
-    elif repeat == "weekly":
-        next_remind_at = remind_at + timedelta(days=7)
-    else:
-        next_remind_at = None
+    next_remind_at = _next_remind_at(remind_at, repeat, _now())
     result = await _update_todo(
         db,
         todo_id,
@@ -358,4 +363,5 @@ if __name__ == "__main__":
     }
     assert "高优先级" in _message(sample)
     assert _parse_datetime("2026-07-20T09:00:00", "now").hour == 9
+    assert _next_remind_at(datetime(2026, 7, 1, 9), "daily", datetime(2026, 7, 3, 10)) == datetime(2026, 7, 4, 9)
     print("todos.py 自检通过：提醒 JSON、消息模板与时间解析正确。")

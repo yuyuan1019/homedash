@@ -4,12 +4,20 @@ from fastapi import HTTPException
 from app.modules import items, todos
 
 
+def _item_name(action: dict) -> str:
+    """归一化物品名：LLM 可能输出 name 或 item_name，统一取 name。"""
+    return str(action.get("name") or action.get("item_name") or "").strip()
+
+
 async def _item_id(db, action: dict) -> int:
     item_id = action.get("item_id")
     if item_id is not None:
         await items._get_item(db, item_id)
         return item_id
-    name = action.get("name", "").strip()
+    name = _item_name(action)
+    if not name:
+        # ponytail: 双保险，正常流程已被 ai_workbench._validate 拦截。
+        raise HTTPException(400, "缺少物品标识（name/item_name/item_id）")
     cur = await db.execute("SELECT id FROM items WHERE name=?", (name,))
     row = await cur.fetchone()
     if row:
@@ -22,6 +30,8 @@ async def _item_id(db, action: dict) -> int:
         "category": action.get("category"),
         "current_stock": 0,
         "min_stock": action.get("min_stock", 1),
+        "location": action.get("location"),
+        "expires_at": action.get("expires_at"),
     })
 
 
@@ -64,3 +74,11 @@ async def execute_action(db, action: dict) -> dict:
     else:
         raise HTTPException(400, f"不支持的 AI 操作: {op}")
     return {"op": op, "ok": True, "todo_id": todo_id}
+
+
+if __name__ == "__main__":
+    assert _item_name({"name": "纸巾"}) == "纸巾"
+    assert _item_name({"item_name": "纸巾"}) == "纸巾"
+    assert _item_name({"name": " 纸巾 ", "item_name": "忽略"}) == "纸巾"
+    assert _item_name({}) == ""
+    print("ai_executor.py 自检通过：物品名归一化正确。")

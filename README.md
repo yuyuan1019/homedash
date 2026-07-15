@@ -112,6 +112,8 @@ X-HomeDash-Token: <AGENT_API_TOKEN>
 - `POST /api/ai/parse` 只解析不写库；`POST /api/ai/apply` 只执行白名单动作；`GET /api/ai/audit` 查询审计
 - 支持库存购买、消耗、盘点、新建/更新物品，及重点待办的新建、完成、重开、更新、删除；支持只读查询需买物品和待办
 - LLM 不能执行 SQL、不能控制米家设备；非法操作、SQL 关键词、越界数值都会被服务端拒绝
+- **字段归一化**：LLM 输出 `name` 或 `item_name` 均归一为 `name`；购买/消耗/盘点/更新缺少物品标识一律拒绝，空名物品无法创建
+- **全流程审计**：parse 与 apply 两阶段**无论成败都写 `ai_audit`**，记录 `session_id`、`llm_model`、`reply`、`confidence`、`duration_ms`、`error`，以及每条写操作的 `before_json`/`after_json` 前后快照；前端「操作溯源」区按 session 串联展示，支持按条撤回
 
 ---
 

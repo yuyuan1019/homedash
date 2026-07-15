@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS items (
     unit TEXT DEFAULT '个',
     current_stock REAL DEFAULT 0,
     min_stock REAL DEFAULT 1,
+    location TEXT,
+    expires_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS usage_logs (
@@ -53,6 +55,16 @@ CREATE TABLE IF NOT EXISTS ai_audit (
     actions_json TEXT,
     results_json TEXT,
     ok INTEGER,
+    stage TEXT,
+    session_id TEXT,
+    llm_model TEXT,
+    llm_reply TEXT,
+    confidence TEXT,
+    duration_ms INTEGER,
+    error TEXT,
+    before_json TEXT,
+    after_json TEXT,
+    reverted INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS device_preferences (
@@ -71,10 +83,26 @@ async def get_db() -> aiosqlite.Connection:
     return _db
 
 
+async def _ensure_columns(db, table: str, columns: dict[str, str]) -> None:
+    """对已有库补列：CREATE TABLE IF NOT EXISTS 不会改旧表结构，需 ALTER 容错。"""
+    cur = await db.execute(f"PRAGMA table_info({table})")
+    existing = {row["name"] for row in await cur.fetchall()}
+    for col, decl in columns.items():
+        if col not in existing:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
 async def init_db() -> None:
     global _db
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     _db = await aiosqlite.connect(DB_PATH)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
+    await _ensure_columns(_db, "items", {"location": "TEXT", "expires_at": "TEXT"})
+    await _ensure_columns(_db, "ai_audit", {
+        "stage": "TEXT", "session_id": "TEXT", "llm_model": "TEXT",
+        "llm_reply": "TEXT", "confidence": "TEXT", "duration_ms": "INTEGER",
+        "error": "TEXT", "before_json": "TEXT", "after_json": "TEXT",
+        "reverted": "INTEGER DEFAULT 0",
+    })
     await _db.commit()
