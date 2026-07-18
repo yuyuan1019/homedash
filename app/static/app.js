@@ -46,6 +46,9 @@ const API = {
   setupLlmSave: '/api/setup/llm/save',
   setupLlmTest: '/api/setup/llm/test',
   setupLlmModels: '/api/setup/llm/models',
+  setupBraveConfig: '/api/setup/brave/config',
+  setupBraveSave: '/api/setup/brave/save',
+  setupBraveTest: '/api/setup/brave/test',
   setupNotifyConfig: '/api/setup/notify/config',
   setupNotifySave: '/api/setup/notify/save',
   setupNotifyTest: '/api/setup/notify/test',
@@ -1762,6 +1765,7 @@ function renderSetup() {
         <div class="setup-status-item">${statusText(s.xiaomi_cloud_status, '小米云端凭据')}</div>
         <div class="setup-status-item">${statusText(s.llm_configured, 'AI 工作台 LLM')}</div>
         <div class="setup-status-item">${statusOptional(s.smtp_configured, 'SMTP 周报（可选）')}</div>
+        <div class="setup-status-item">${statusOptional(s.brave_configured, 'Brave 网络搜索（可选）')}</div>
         <div class="setup-status-item">${statusOptional(s.kuma_public_url_configured, 'Uptime 跳转（可选）')}</div>
       </div>
       ${s.missing && s.missing.length ? `<div class="setup-missing">待处理：${esc(s.missing.join('、'))}</div>` : '<div class="setup-ok">全部配置就绪 🎉</div>'}
@@ -1868,6 +1872,19 @@ function renderSetup() {
     </details>
 
     <details class="card">
+      <summary class="section-title">Brave Search 网络搜索（可选）</summary>
+      <div class="setup-help">配置后，家庭顾问可以搜索互联网获取实时信息（天气、新闻等）。<b>API Key 申请：</b><code>https://brave.com/search/api/</code>（免费额度 2,000 次/月）。不配置不影响聊天功能。</div>
+      <form id="setup-brave-form" class="setup-form">
+        <div class="form-group"><label>API Key</label><input type="password" id="brave-api-key" placeholder="BSA..."></div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">保存并测试</button>
+          <button type="button" class="btn" id="brave-test-only-btn">仅测试</button>
+        </div>
+        <div id="brave-result" class="setup-result"></div>
+      </form>
+    </details>
+
+    <details class="card">
       <summary class="section-title">SMTP 周报配置</summary>
       <div class="setup-help">保存后写入 <code>data/notify_config.json</code> 并立即生效。QQ 邮箱需使用 SMTP 授权码，不是网页登录密码。</div>
       <form id="setup-notify-form" class="setup-form">
@@ -1902,6 +1919,7 @@ function renderSetup() {
   if (showDeviceSetup) loadDeviceList();
   loadAppConfig();
   loadLlmConfig();
+  loadBraveConfig();
   loadNotifyConfig();
   loadUsers();
 }
@@ -1916,6 +1934,8 @@ function bindSetupEvents() {
   document.getElementById('setup-llm-form').addEventListener('submit', saveLlmConfig);
   document.getElementById('llm-test-only-btn').addEventListener('click', testLlmConfig);
   document.getElementById('llm-models-btn').addEventListener('click', loadLlmModels);
+  document.getElementById('setup-brave-form').addEventListener('submit', saveBraveConfig);
+  document.getElementById('brave-test-only-btn').addEventListener('click', testBraveConfig);
   document.getElementById('setup-notify-form').addEventListener('submit', saveNotifyConfig);
   document.getElementById('notify-test-only-btn').addEventListener('click', testNotifyConfig);
   document.getElementById('notify-send-test-btn').addEventListener('click', sendTestNotify);
@@ -2103,6 +2123,7 @@ async function refreshSetupOverview() {
     <div class="setup-status-item">${statusText(s.xiaomi_cloud_status, '小米云端凭据')}</div>
     <div class="setup-status-item">${statusText(s.llm_configured, 'AI 工作台 LLM')}</div>
     <div class="setup-status-item">${statusOptional(s.smtp_configured, 'SMTP 周报（可选）')}</div>
+    <div class="setup-status-item">${statusOptional(s.brave_configured, 'Brave 网络搜索（可选）')}</div>
     <div class="setup-status-item">${statusOptional(s.kuma_public_url_configured, 'Uptime 跳转（可选）')}</div>`;
   const missing = document.querySelector('.setup-missing, .setup-ok');
   if (missing) {
@@ -2291,6 +2312,36 @@ async function loadLlmModels() {
     document.getElementById('llm-model').value = btn.dataset.model;
     toast(`已选择模型 ${btn.dataset.model}`, 'success');
   }));
+}
+
+async function loadBraveConfig() {
+  const { ok, data } = await fetchJSON(API.setupBraveConfig);
+  if (!ok || !data) return;
+  document.getElementById('brave-api-key').value = data.api_key || '';
+}
+
+async function saveBraveConfig(e) {
+  e.preventDefault();
+  const payload = { api_key: document.getElementById('brave-api-key').value.trim() };
+  const { ok, data } = await fetchJSON(API.setupBraveSave, { method: 'POST', body: JSON.stringify(payload) });
+  const resultBox = document.getElementById('brave-result');
+  if (!ok) {
+    resultBox.textContent = data?.detail || '保存失败';
+    resultBox.className = 'setup-result error';
+    return;
+  }
+  resultBox.textContent = data.message || (data.tested ? '保存成功，Brave Search 连接正常' : '保存成功，但连接测试失败');
+  resultBox.className = `setup-result ${data.tested ? 'success' : 'warning'}`;
+  await refreshSetupOverview();
+}
+
+async function testBraveConfig() {
+  const payload = { api_key: document.getElementById('brave-api-key').value.trim() };
+  const resultBox = document.getElementById('brave-result');
+  resultBox.textContent = '测试中...';
+  const { ok, data } = await fetchJSON(API.setupBraveTest, { method: 'POST', body: JSON.stringify(payload) });
+  resultBox.textContent = data?.message || (ok ? '连接正常' : '连接失败');
+  resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
 }
 
 async function loadNotifyConfig() {

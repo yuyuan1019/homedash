@@ -73,6 +73,76 @@ def _llm_config_value(key: str, default: Any = "") -> Any:
     return default
 
 
+def _brave_config() -> dict | None:
+    """读取 Brave Search 配置：环境变量 BRAVE_API_KEY 优先，其次 data/brave_config.json。"""
+    env_key = os.getenv("BRAVE_API_KEY", "").strip()
+    if env_key:
+        return {"api_key": env_key}
+    path = "data/brave_config.json"
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _brave_api_key() -> str | None:
+    cfg = _brave_config()
+    if cfg and cfg.get("api_key"):
+        return str(cfg["api_key"]).strip()
+    return None
+
+
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+
+BRAVE_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "brave_web_search",
+        "description": "使用 Brave Search 搜索互联网获取实时信息，如天气、新闻、百科知识、最新趋势等。当用户询问需要实时数据或超出你知识范围的问题时使用此工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词，使用中文或英文",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+async def _brave_search(query: str, count: int = 5) -> list[dict]:
+    """调用 Brave Search API，返回简化结果列表。"""
+    api_key = _brave_api_key()
+    if not api_key:
+        return []
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(
+            BRAVE_SEARCH_URL,
+            headers={
+                "X-Subscription-Token": api_key,
+                "Accept": "application/json",
+            },
+            params={"q": query, "count": str(min(count, 10))},
+        )
+    if response.status_code >= 400:
+        return []
+    data = response.json()
+    web = data.get("web", {}) if isinstance(data, dict) else {}
+    results = web.get("results", [])
+    if not isinstance(results, list):
+        return []
+    return [
+        {"title": r.get("title", ""), "url": r.get("url", ""), "description": r.get("description", "")}
+        for r in results[:count]
+    ]
+
+
 def _enabled() -> bool:
     value = _llm_config_value("enabled", os.getenv("AI_ENABLED", "true"))
     return str(value).lower() in {"1", "true", "yes", "on"}
@@ -350,13 +420,15 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
     if not payload.text.strip():
         raise HTTPException(400, "请输入内容")
     base_url, api_key, model, timeout_sec = _llm_config()
+    brave_available = _brave_api_key() is not None
     chat_prompt = (
         "你是 HomeDash 家庭管理顾问，一个友好、简洁的中文助手。你可以帮助用户：\n"
         "- 解答关于家庭物品管理、库存预测的问题\n"
         "- 提供家务和家庭管理的建议\n"
         "- 解释 HomeDash 面板的功能和使用方法\n"
         "- 根据下方上下文快照回答用户关于当前库存数量、待办状态等问题\n"
-        "回复用中文，简洁清晰，不要 Markdown 格式。如果不知道答案，诚实说明。"
+        + ("- 如需查询实时信息（天气、新闻、百科等），可使用 brave_web_search 工具搜索网络\n" if brave_available else "")
+        + "回复用中文，简洁清晰，不要 Markdown 格式。如果不知道答案，诚实说明。"
         "上下文：" + json.dumps(await _snapshot(db), ensure_ascii=False)
     )
     messages = [{"role": "system", "content": chat_prompt}]
@@ -367,24 +439,60 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": str(content)})
     messages.append({"role": "user", "content": payload.text})
+
+    tools = [BRAVE_SEARCH_TOOL] if brave_available else None
     started = time.perf_counter()
+    final_reply = ""
+    max_turns = 5
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             headers = {"Authorization": f"Bearer {api_key}"}
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json={"model": model, "messages": messages},
-            )
-        if response.status_code >= 400:
-            raise HTTPException(502, _llm_error_message(response.status_code))
-        data = _response_json(response)
-        reply = data["choices"][0]["message"]["content"]
-        if not isinstance(reply, str):
-            reply = str(reply)
-        reply = reply.strip()
-        if not reply:
-            raise HTTPException(502, "模型未返回有效回复")
+            for _ in range(max_turns):
+                body: dict = {"model": model, "messages": messages}
+                if tools:
+                    body["tools"] = tools
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=body,
+                )
+                if response.status_code >= 400:
+                    raise HTTPException(502, _llm_error_message(response.status_code))
+                data = _response_json(response)
+                msg = data["choices"][0]["message"]
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    messages.append({
+                        "role": "assistant",
+                        "content": msg.get("content"),
+                        "tool_calls": tool_calls,
+                    })
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        if func.get("name") == "brave_web_search":
+                            args_str = func.get("arguments", "{}")
+                            try:
+                                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                            except json.JSONDecodeError:
+                                args = {}
+                            query = args.get("query", "")
+                            if query:
+                                results = await _brave_search(query)
+                                result_text = json.dumps(results, ensure_ascii=False) if results else "未找到相关搜索结果"
+                            else:
+                                result_text = "搜索关键词为空，请提供有效的搜索词"
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": result_text,
+                            })
+                    continue
+
+                content = msg.get("content", "")
+                if not isinstance(content, str):
+                    content = str(content)
+                final_reply = content.strip()
+                break
     except HTTPException:
         raise
     except Exception as exc:
@@ -396,11 +504,15 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
         if isinstance(exc, ValueError):
             raise HTTPException(502, str(exc)) from exc
         raise HTTPException(502, "模型调用失败，请检查 LLM 配置或稍后重试") from exc
+
+    if not final_reply:
+        raise HTTPException(502, "模型未返回有效回复")
+
     duration_ms = int((time.perf_counter() - started) * 1000)
     await _safe_audit(db, raw_text=payload.text, ok=True, stage="chat",
                       session_id=payload.session_id, llm_model=model,
-                      llm_reply=reply, duration_ms=duration_ms)
-    return {"ok": True, "reply": reply, "session_id": payload.session_id}
+                      llm_reply=final_reply, duration_ms=duration_ms)
+    return {"ok": True, "reply": final_reply, "session_id": payload.session_id}
 
 
 @router.post("/ai/item-category")

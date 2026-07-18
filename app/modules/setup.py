@@ -22,6 +22,7 @@ NOTIFY_CONFIG_FILE = os.path.join(DATA_DIR, "notify_config.json")
 APP_CONFIG_FILE = os.path.join(DATA_DIR, "app_config.json")
 XIAOMI_CREDS_FILE = os.path.join(DATA_DIR, "xiaomi_cloud.json")
 BLE_DEVICES_FILE = os.path.join(DATA_DIR, "ble_devices.json")
+BRAVE_CONFIG_FILE = os.path.join(DATA_DIR, "brave_config.json")
 
 
 class DeviceIn(BaseModel):
@@ -72,6 +73,10 @@ class NotifyConfigIn(BaseModel):
 
 class AppConfigIn(BaseModel):
     kuma_public_url: str = ""
+
+
+class BraveConfigIn(BaseModel):
+    api_key: str = ""
 
 
 def _devices_yaml_path() -> str:
@@ -185,6 +190,28 @@ def _llm_config() -> dict | None:
     return _llm_env_config() or _llm_file_config()
 
 
+def _brave_file_config() -> dict | None:
+    if not os.path.isfile(BRAVE_CONFIG_FILE):
+        return None
+    try:
+        with open(BRAVE_CONFIG_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _brave_config() -> dict:
+    env_key = os.getenv("BRAVE_API_KEY", "").strip()
+    if env_key:
+        return {"api_key": env_key}
+    file_cfg = _brave_file_config() or {}
+    return {"api_key": file_cfg.get("api_key", "")}
+
+
+def _brave_configured() -> bool:
+    return bool(_brave_config().get("api_key"))
+
+
 def _notify_file_config() -> dict:
     if not os.path.isfile(NOTIFY_CONFIG_FILE):
         return {}
@@ -286,6 +313,33 @@ async def _test_llm_connection(cfg: dict) -> tuple[bool, str]:
         return False, "LLM 连接失败，请检查地址、密钥和模型名"
 
 
+async def _test_brave_connection(api_key: str) -> tuple[bool, str]:
+    if not api_key:
+        return False, "Brave API Key 未配置"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={
+                    "X-Subscription-Token": api_key,
+                    "Accept": "application/json",
+                },
+                params={"q": "test", "count": "1"},
+            )
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict) and "web" in data:
+                return True, "Brave Search 连接正常"
+            return False, "Brave Search 返回异常格式，请检查 API Key"
+        if response.status_code in {401, 403}:
+            return False, "Brave API Key 无效或无权限"
+        if response.status_code == 429:
+            return False, "Brave Search 本月配额已用完"
+        return False, f"Brave Search 连接失败 (HTTP {response.status_code})"
+    except httpx.HTTPError:
+        return False, "Brave Search 连接失败，请检查网络"
+
+
 async def _fetch_llm_models(cfg: dict) -> tuple[bool, str, list[str]]:
     try:
         async with httpx.AsyncClient(timeout=cfg["timeout_sec"]) as client:
@@ -367,6 +421,14 @@ def _merge_notify_payload(payload: NotifyConfigIn) -> dict:
     }
 
 
+def _merge_brave_payload(payload: BraveConfigIn) -> dict:
+    current = _brave_config()
+    api_key = payload.api_key.strip()
+    if not api_key or _masked(api_key):
+        api_key = current.get("api_key", "")
+    return {"api_key": api_key}
+
+
 def _test_smtp_sync(cfg: dict) -> tuple[bool, str]:
     if not cfg["smtp_host"] or not cfg["smtp_user"] or not cfg["smtp_password"] or not cfg["notify_to"]:
         return False, "SMTP_HOST、SMTP_USER、SMTP_PASSWORD 和 NOTIFY_TO 必填"
@@ -395,6 +457,7 @@ async def setup_status():
     xiaomi_file = _has_xiaomi_creds_file()
     xiaomi_any = _has_xiaomi_creds()
     smtp_configured = _notify_configured()
+    brave_configured = _brave_configured()
     agent_token = os.getenv("AGENT_API_TOKEN", "")
 
     missing = []
@@ -422,6 +485,7 @@ async def setup_status():
         "smtp_configured": smtp_configured,
         "kuma_public_url_configured": bool(_app_config()["kuma_public_url"]),
         "agent_token_configured": bool(agent_token),
+        "brave_configured": brave_configured,
         "missing": missing,
     }
 
@@ -604,6 +668,36 @@ async def list_llm_models():
     return {"ok": ok, "message": message, "models": models}
 
 
+@router.get("/setup/brave/config")
+async def get_brave_config():
+    cfg = _brave_config()
+    api_key = cfg.get("api_key", "")
+    return {
+        "api_key": _mask(api_key) if api_key else "",
+        "source": "env" if os.getenv("BRAVE_API_KEY", "").strip() else "file" if _brave_file_config() else "none",
+    }
+
+
+@router.post("/setup/brave/save")
+async def save_brave_config(payload: BraveConfigIn):
+    api_key = _merge_brave_payload(payload)["api_key"]
+    if api_key:
+        _write_json(BRAVE_CONFIG_FILE, {"api_key": api_key})
+    elif os.path.isfile(BRAVE_CONFIG_FILE):
+        os.remove(BRAVE_CONFIG_FILE)
+    ok, message = await _test_brave_connection(api_key)
+    return {"ok": True, "tested": ok, "message": message if ok else f"保存成功，但{message}"}
+
+
+@router.post("/setup/brave/test")
+async def test_brave_config(payload: BraveConfigIn):
+    api_key = _merge_brave_payload(payload)["api_key"]
+    if not api_key:
+        return {"ok": False, "message": "API Key 不能为空"}
+    ok, message = await _test_brave_connection(api_key)
+    return {"ok": ok, "message": message}
+
+
 @router.get("/setup/notify/config")
 async def get_notify_config():
     cfg = _notify_config()
@@ -642,6 +736,9 @@ async def env_snippet():
     if not os.getenv("AGENT_API_TOKEN", ""):
         lines.append("# home agent 接口 token（公网映射时必须设置）：")
         lines.append("# AGENT_API_TOKEN=your-random-token")
+    if not _brave_configured():
+        lines.append("# Brave Search 联网搜索（可在设置页直接保存到 data/brave_config.json）：")
+        lines.append("# BRAVE_API_KEY=")
     return {"snippet": "\n".join(lines)}
 
 
