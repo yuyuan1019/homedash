@@ -70,8 +70,31 @@ CREATE TABLE IF NOT EXISTS ai_audit (
 CREATE TABLE IF NOT EXISTS device_preferences (
     device_name TEXT PRIMARY KEY,
     hidden INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER,
     updated_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    last_login_at TEXT
+);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_seen_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
 """
 
 _db: aiosqlite.Connection | None = None
@@ -99,6 +122,7 @@ async def init_db() -> None:
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
     await _ensure_columns(_db, "items", {"location": "TEXT", "expires_at": "TEXT"})
+    await _ensure_columns(_db, "device_preferences", {"sort_order": "INTEGER"})
     await _ensure_columns(_db, "ai_audit", {
         "stage": "TEXT", "session_id": "TEXT", "llm_model": "TEXT",
         "llm_reply": "TEXT", "confidence": "TEXT", "duration_ms": "INTEGER",

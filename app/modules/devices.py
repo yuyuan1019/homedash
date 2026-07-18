@@ -1,6 +1,7 @@
 """米家设备控制：WiFi 局域网直控 + BLE Mesh 云端控制。"""
 import asyncio
 import json
+import math
 import os
 from datetime import datetime
 from typing import Any
@@ -28,6 +29,8 @@ _POWER_CMDS = {
     "airconditioner": ("set_power", ["on"], "set_power", ["off"]),
 }
 _DEFAULT = ("set_power", ["on"], "set_power", ["off"])
+_TEMPERATURE_COMMANDS = {"set_temperature"}
+_TEMPERATURE_PROPERTIES = {"target_temperature", "temperature"}
 
 # BLE Mesh 设备 MIOT 属性映射：type -> (siid, piid_on)
 # ponytail: 按设备类型查表；新类型加一行即可
@@ -40,6 +43,7 @@ _MIOT_PROPS = {
 }
 
 _devices: dict[str, dict] = {}
+_target_temperature_cache: dict[str, float] = {}
 
 # ============ 云端 BLE Mesh 控制 ============
 
@@ -169,6 +173,99 @@ def _send_power(cfg: dict, on: bool) -> None:
             _send(cfg, cmds[2], cmds[3])
 
 
+def _number(value: float) -> int | float:
+    return int(value) if float(value).is_integer() else value
+
+
+def _temperature_config(cfg: dict, strict: bool = False) -> dict | None:
+    """解析显式温控能力；无效配置默认不暴露，设置时返回中文错误。"""
+    raw = cfg.get("temperature")
+    if cfg.get("type") != "airconditioner" or not isinstance(raw, dict):
+        if strict:
+            raise HTTPException(400, "该设备未配置温控能力")
+        return None
+    try:
+        minimum = float(raw["min"])
+        maximum = float(raw["max"])
+        step = float(raw["step"])
+    except (KeyError, TypeError, ValueError):
+        if strict:
+            raise HTTPException(400, "空调温控配置缺少有效的 min、max 或 step")
+        return None
+    valid_numbers = all(math.isfinite(value) for value in (minimum, maximum, step))
+    if not valid_numbers or minimum >= maximum or step <= 0:
+        if strict:
+            raise HTTPException(400, "空调温控范围配置无效")
+        return None
+
+    config = {"min": minimum, "max": maximum, "step": step}
+    if _is_cloud_device(cfg):
+        siid = raw.get("siid")
+        piid = raw.get("piid")
+        if not isinstance(siid, int) or not isinstance(piid, int) or siid <= 0 or piid <= 0:
+            if strict:
+                raise HTTPException(400, "云端空调温控需要有效的 siid 和 piid")
+            return None
+        config.update({"siid": siid, "piid": piid})
+    else:
+        if not cfg.get("host"):
+            if strict:
+                raise HTTPException(400, "WiFi 空调温控需要配置 host")
+            return None
+        command = raw.get("command")
+        if command not in _TEMPERATURE_COMMANDS:
+            if strict:
+                raise HTTPException(400, "WiFi 空调温控命令不在白名单")
+            return None
+        prop = raw.get("property")
+        if prop is not None and prop not in _TEMPERATURE_PROPERTIES:
+            if strict:
+                raise HTTPException(400, "WiFi 空调温度查询属性不在白名单")
+            return None
+        config.update({"command": command, "property": prop})
+    return config
+
+
+def _temperature_capability(cfg: dict) -> dict | None:
+    config = _temperature_config(cfg)
+    if not config:
+        return None
+    return {key: _number(config[key]) for key in ("min", "max", "step")}
+
+
+def _validate_temperature(config: dict, value: float) -> int | float:
+    if not math.isfinite(value):
+        raise HTTPException(400, "目标温度必须是有限数字")
+    if value < config["min"] or value > config["max"]:
+        raise HTTPException(400, f"目标温度必须在 {_number(config['min'])} 到 {_number(config['max'])}℃ 之间")
+    steps = (value - config["min"]) / config["step"]
+    if not math.isclose(steps, round(steps), abs_tol=1e-7):
+        raise HTTPException(400, f"目标温度必须按 {_number(config['step'])}℃ 步长调节")
+    return _number(value)
+
+
+def _send_temperature(cfg: dict, config: dict, value: int | float) -> None:
+    if _is_cloud_device(cfg):
+        _cloud_miot_set(cfg["did"], config["siid"], config["piid"], value)
+    else:
+        _send(cfg, config["command"], [value])
+    _target_temperature_cache[cfg["name"]] = value
+
+
+def _query_target_temperature(cfg: dict, config: dict) -> int | float | None:
+    try:
+        if _is_cloud_device(cfg):
+            value = _val(_cloud_miot_get(cfg["did"], config["siid"], config["piid"]))
+        elif config.get("property"):
+            value = _val(_send(cfg, "get_prop", [config["property"]]))
+        else:
+            value = _target_temperature_cache.get(cfg["name"])
+        numeric = float(value) if value is not None else None
+        return _number(numeric) if numeric is not None and math.isfinite(numeric) else None
+    except Exception:
+        return _target_temperature_cache.get(cfg["name"])
+
+
 def _val(result):
     """提取 miio/miot 返回里的第一个值。"""
     if isinstance(result, list):
@@ -196,6 +293,9 @@ def _query_power_sync(cfg: dict) -> dict:
         base["error"] = "状态获取失败"
     except Exception:
         base["error"] = "状态获取失败"
+    temperature = _temperature_config(cfg)
+    if temperature:
+        base["target_temperature"] = _query_target_temperature(cfg, temperature)
     return base
 
 
@@ -218,25 +318,50 @@ class VisibilityIn(BaseModel):
     hidden: bool
 
 
-async def _hidden_names(db) -> set[str]:
-    cur = await db.execute("SELECT device_name FROM device_preferences WHERE hidden=1")
-    return {row["device_name"] for row in await cur.fetchall()}
+class DeviceOrderIn(BaseModel):
+    device_names: list[str]
+
+
+class TemperatureIn(BaseModel):
+    temperature: float
+
+
+async def _preferences(db) -> dict[str, dict]:
+    cur = await db.execute("SELECT device_name, hidden, sort_order FROM device_preferences")
+    return {row["device_name"]: dict(row) for row in await cur.fetchall()}
 
 
 async def _devices_with_visibility(db, include_hidden: bool) -> list[dict]:
-    hidden_names = await _hidden_names(db)
-    return _serialize_devices(hidden_names, include_hidden)
+    return _serialize_devices(await _preferences(db), include_hidden)
 
 
-def _serialize_devices(hidden_names: set[str], include_hidden: bool) -> list[dict]:
+def _ordered_configs(preferences: dict[str, dict]) -> list[dict]:
+    yaml_order = {name: index for index, name in enumerate(_devices)}
+    return sorted(
+        _devices.values(),
+        key=lambda cfg: (
+            preferences.get(cfg["name"], {}).get("sort_order") is None,
+            preferences.get(cfg["name"], {}).get("sort_order") or 0,
+            yaml_order[cfg["name"]],
+        ),
+    )
+
+
+def _serialize_devices(preferences: dict[str, dict], include_hidden: bool) -> list[dict]:
     out = []
-    for cfg in _devices.values():
-        if not include_hidden and cfg["name"] in hidden_names:
+    for cfg in _ordered_configs(preferences):
+        preference = preferences.get(cfg["name"], {})
+        hidden = bool(preference.get("hidden"))
+        if not include_hidden and hidden:
             continue
-        item = {key: value for key, value in cfg.items() if not key.startswith("_")}
-        if item.get("token"):
-            item["token"] = item["token"][:4] + "*" * 24 + item["token"][-4:]
-        item["hidden"] = cfg["name"] in hidden_names
+        temperature = _temperature_capability(cfg)
+        item = {
+            "name": cfg["name"],
+            "type": cfg.get("type", "other"),
+            "connection": "cloud" if _is_cloud_device(cfg) else "wifi" if cfg.get("host") else "unknown",
+            "hidden": hidden,
+            "capabilities": {"temperature": temperature} if temperature else {},
+        }
         out.append(item)
     return out
 
@@ -255,9 +380,36 @@ async def list_devices(include_hidden: bool = False, db=Depends(get_db)):
 @router.get("/devices/status")
 async def device_status(include_hidden: bool = False, db=Depends(get_db)):
     """所有设备在线/电源状态；单台失败不影响其他设备。"""
-    hidden_names = await _hidden_names(db)
-    configs = [cfg for cfg in _devices.values() if include_hidden or cfg["name"] not in hidden_names]
+    preferences = await _preferences(db)
+    configs = [
+        cfg for cfg in _ordered_configs(preferences)
+        if include_hidden or not bool(preferences.get(cfg["name"], {}).get("hidden"))
+    ]
     return await asyncio.gather(*[_query_power(cfg) for cfg in configs])
+
+
+@router.put("/devices/order")
+async def set_device_order(payload: DeviceOrderIn, db=Depends(get_db)):
+    expected = list(_devices)
+    names = payload.device_names
+    if len(names) != len(set(names)):
+        raise HTTPException(400, "设备顺序中存在重复名称")
+    if set(names) != set(expected) or len(names) != len(expected):
+        raise HTTPException(400, "设备顺序必须完整包含当前全部设备")
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        await db.execute("BEGIN")
+        for index, name in enumerate(names):
+            await db.execute(
+                "INSERT INTO device_preferences(device_name,sort_order,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(device_name) DO UPDATE SET sort_order=excluded.sort_order, updated_at=excluded.updated_at",
+                (name, index, now),
+            )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"device_names": names}
 
 
 @router.put("/devices/{name}/visibility")
@@ -270,6 +422,22 @@ async def set_visibility(name: str, payload: VisibilityIn, db=Depends(get_db)):
     )
     await db.commit()
     return {"name": name, "hidden": payload.hidden}
+
+
+@router.put("/devices/{name}/temperature")
+async def set_temperature(name: str, payload: TemperatureIn):
+    cfg = _get(name)
+    config = _temperature_config(cfg, strict=True)
+    value = _validate_temperature(config, payload.temperature)
+    try:
+        await asyncio.to_thread(_send_temperature, cfg, config, value)
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            raise
+        raise HTTPException(503, "温度设置失败，请检查设备连接或温控配置") from None
+    except Exception:
+        raise HTTPException(503, "温度设置失败，请检查设备连接或温控配置") from None
+    return {"name": name, "target_temperature": value}
 
 
 @router.post("/devices/{name}/on")
@@ -304,9 +472,37 @@ if __name__ == "__main__":
     assert _val({"result": [{"value": True}]}) is True
     original_devices = dict(_devices)
     _devices.clear()
-    _devices.update({"可见": {"name": "可见"}, "隐藏": {"name": "隐藏"}})
-    assert [item["name"] for item in _serialize_devices({"隐藏"}, False)] == ["可见"]
-    assert _serialize_devices({"隐藏"}, True)[1]["hidden"] is True
+    _devices.update({
+        "客厅灯": {"name": "客厅灯", "type": "light", "host": "192.0.2.1", "token": "0" * 32},
+        "空调": {"name": "空调", "type": "airconditioner", "host": "192.0.2.2", "token": "1" * 32,
+                 "temperature": {"min": 16, "max": 30, "step": 1, "command": "set_temperature"}},
+        "隐藏": {"name": "隐藏", "type": "plug", "host": "192.0.2.3", "token": "2" * 32},
+    })
+    prefs = {"空调": {"sort_order": 0, "hidden": 0}, "客厅灯": {"sort_order": 1, "hidden": 0}, "隐藏": {"sort_order": 2, "hidden": 1}}
+    assert [item["name"] for item in _serialize_devices(prefs, False)] == ["空调", "客厅灯"]
+    all_devices = _serialize_devices(prefs, True)
+    assert all_devices[2]["hidden"] is True
+    assert all_devices[0]["capabilities"]["temperature"] == {"min": 16, "max": 30, "step": 1}
+    assert "host" not in all_devices[0] and "token" not in all_devices[0]
+    assert _validate_temperature(_temperature_config(_devices["空调"], strict=True), 26) == 26
+    try:
+        _validate_temperature(_temperature_config(_devices["空调"], strict=True), 30.5)
+        raise AssertionError("越界温度应拒绝")
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    sent = []
+    original_send = _send
+    original_cloud_set = _cloud_miot_set
+    _send = lambda cfg, command, params=None: sent.append(("wifi", command, params))
+    _cloud_miot_set = lambda did, siid, piid, value, country="cn": sent.append(("cloud", siid, piid, value))
+    _send_temperature(_devices["空调"], _temperature_config(_devices["空调"], strict=True), 25)
+    cloud_air = {"name": "云空调", "type": "airconditioner", "did": "example",
+                 "temperature": {"min": 16, "max": 30, "step": 1, "siid": 2, "piid": 3}}
+    _send_temperature(cloud_air, _temperature_config(cloud_air, strict=True), 24)
+    assert sent == [("wifi", "set_temperature", [25]), ("cloud", 2, 3, 24)]
+    _send = original_send
+    _cloud_miot_set = original_cloud_set
+    _target_temperature_cache.clear()
     _devices.clear()
     _devices.update(original_devices)
     load_devices()  # 无文件不报错，有文件正常加载

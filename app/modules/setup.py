@@ -481,6 +481,9 @@ async def save_device(payload: DeviceIn):
         device["did"] = payload.did.strip()
     if payload.siid is not None:
         device["siid"] = payload.siid
+    # 保留仅在本地 YAML 声明的协议能力；设置表单不暴露 command / siid / piid 编辑。
+    if existing.get("temperature"):
+        device["temperature"] = existing["temperature"]
 
     names = [d.get("name") for d in device_list]
     if lookup in names:

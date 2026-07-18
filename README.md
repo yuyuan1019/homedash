@@ -1,6 +1,6 @@
 # 🏠 HomeDash
 
-家庭自托管管理面板：**米家设备控制 · Uptime 监控 · 日用品库存预测 · 重点待办 · SMTP 周报 · AI 工作台**。
+家庭自托管管理面板：**长期登录与用户权限 · 米家设备控制 · Uptime 监控 · 日用品库存预测 · 重点待办 · SMTP 周报 · AI 工作台**。
 
 中文 UI，无前端框架，Docker 可一键部署。
 
@@ -22,21 +22,25 @@
 | Uptime 监控 | ✅ 已实现 | 只读挂载 Uptime Kuma SQLite，60s 缓存 |
 | 日用品库存 | ✅ 已实现 | CRUD + 消耗/购买 + EWMA 预测 + 安全库存 + 购物清单 |
 | 设备状态 | ✅ 已实现 | `GET /api/devices/status` best-effort |
-| 设备展示管理 | ✅ 已实现 | 隐藏/恢复设备，不修改 YAML 或设备配置 |
+| 设备展示管理 | ✅ 已实现 | 页面内隐藏/恢复、跨类型全局自由排序，不修改 YAML |
 | Docker 部署 | ✅ 已实现 | `Dockerfile` + Compose，端口/Kuma 目录可配 |
 | 日用品预测升级 | ✅ 已实现 | EWMA + 安全库存 + 品类先验 / 购买间隔兜底（DEVPLAN 待办 0） |
 | 重点待办 | ✅ 已实现 | 家庭 to-do + home agent 提醒接口（待办 8） |
 | SMTP 周报 | ✅ 已实现 | QQ 邮箱发送待办 + 需购买周报（待办 6） |
 | AI 工作台 | ✅ 已实现 | 自然语言 → 白名单动作预览 → 确认写库（待办 7） |
+| 面板登录与用户管理 | ✅ 已实现 | 180 天长期会话、普通用户/管理员、管理员专属系统设置（待办 9） |
+| 设备页内管理增强 | ✅ 已实现 | 页面内隐藏/恢复、全局自由排序、声明能力的空调温控（待办 10） |
 
 ### 1. 米家设备控制（已实现）
 
 - **WiFi**：python-miio 局域网直控，不经 HA
 - **BLE Mesh**：micloud + 小米云端 MIOT（墙壁开关等）
-- 开关 + 自定义命令透传；前端按类型双列卡片（米家浅色风格）
+- 开关 + 自定义命令透传；前端使用不受类型限制的双列自由排序卡片（米家浅色风格）
 - 云端设备显示「云端」标签；`GET /api/devices/status` 查 online/power、更新时间与脱敏失败摘要
-- 设备页「管理设备」可隐藏或恢复显示；隐藏仅保存到 SQLite 展示偏好，不修改 YAML、不删除设备、不影响现有开关接口
-- 当前设备控制仅保留开关与 WiFi 原始命令，不提供亮度、色温、温度等属性控制
+- 设备页「管理设备」直接进入当前页编辑模式，可隐藏/恢复、桌面拖动或移动端长按拖动；顺序全家共享并在重启后保留
+- 隐藏与排序仅保存到 SQLite `device_preferences`，不修改 YAML、不删除设备、不影响控制 API
+- `type: airconditioner` 且显式声明温控协议能力的设备可在卡片上选择目标温度或用 `−/＋` 调节；未知空调不会猜测命令
+- 普通设备列表只返回名称、类型、连接类别、隐藏状态和安全能力范围，不返回 token、host、did、siid/piid 或 WiFi 命令
 
 ### 2. Uptime 监控（已实现）
 
@@ -115,6 +119,16 @@ X-HomeDash-Token: <AGENT_API_TOKEN>
 - **字段归一化**：LLM 输出 `name` 或 `item_name` 均归一为 `name`；购买/消耗/盘点/更新缺少物品标识一律拒绝，空名物品无法创建
 - **全流程审计**：parse 与 apply 两阶段**无论成败都写 `ai_audit`**，记录 `session_id`、`llm_model`、`reply`、`confidence`、`duration_ms`、`error`，以及每条写操作的 `before_json`/`after_json` 前后快照；前端「操作溯源」区按 session 串联展示，支持按条撤回
 
+### 7. 登录与用户权限（已实现）
+
+- 全新数据库首次打开时创建首个管理员，不提供默认账号或默认密码
+- 用户名密码登录后设置 `HttpOnly` 长期 Cookie，默认 180 天并按活动续期；退出、禁用、删除或重置密码后对应会话立即失效
+- 密码使用 Python 标准库 `hashlib.scrypt` + 独立随机 salt，数据库仅保存会话 token 的 SHA-256 摘要
+- 普通用户可使用设备、监控、日用品、待办和 AI；右上角三点菜单只显示「退出登录」
+- 只有管理员能进入系统设置及 `/api/setup/*`，并可新增普通用户/管理员、启停账户、重置密码和删除用户
+- 不能删除、禁用或降级当前管理员，系统始终至少保留一个启用的管理员
+- 除登录/初始化接口与 `/api/agent/todos/*` 外，面板业务 API 均要求有效登录会话；agent 接口继续使用 `AGENT_API_TOKEN`
+
 ---
 
 ## 技术栈
@@ -185,8 +199,8 @@ micloud
 
 ### 设计原则
 
-1. **家庭内网优先**，默认无用户登录；敏感文件不进 Git  
-2. **领域模块清晰**：设备 / 监控 / 库存 / 待办 / 通知 / AI 分文件
+1. **家庭内网优先**；面板使用长期会话，系统设置仅管理员可访问；敏感文件不进 Git
+2. **领域模块清晰**：认证 / 用户 / 设备 / 监控 / 库存 / 待办 / 通知 / AI 分文件
 3. **预测与写库可测**：`predict_item` 纯函数；模块尾部 `__main__` 自检  
 4. **AI 不直连 SQL**：只产出白名单 `op`，执行器调现有业务函数  
 5. **IM 不进主进程**：HomeDash 不实现微信/QQ 协议，只留 HTTP 给 agent  
@@ -211,9 +225,11 @@ micloud
 
 | 路径 | 职责 |
 |------|------|
-| `app/main.py` | FastAPI 入口、lifespan 建库/加载设备、挂载路由与静态资源 |
-| `app/database.py` | aiosqlite 单例、`SCHEMA`（items / todos / ai_audit / device_preferences） |
-| `app/modules/devices.py` | 设备 YAML 加载、开关、命令、status、BLE 云控、展示隐藏 |
+| `app/main.py` | FastAPI 入口、lifespan 建库/加载设备、面板 API 统一鉴权、挂载路由与静态资源 |
+| `app/database.py` | aiosqlite 单例、`SCHEMA`（业务表 + users / auth_sessions） |
+| `app/modules/auth.py` | 首个管理员、登录/退出、scrypt 密码散列与长期会话 |
+| `app/modules/users.py` | 管理员用户管理、角色边界与会话废止 |
+| `app/modules/devices.py` | 设备 YAML、开关/status、BLE 云控、隐藏/全局排序、显式空调温控 |
 | `app/modules/uptime.py` | Kuma SQLite 只读查询 + 缓存 |
 | `app/modules/items.py` | 日用品 CRUD、消耗/购买、EWMA + 安全库存预测、`predict_item`、predictions |
 | `app/modules/todos.py` | 重点待办 CRUD、提醒意图与 `/api/agent/todos/*` |
@@ -252,6 +268,8 @@ uvicorn app.main:app --reload
 # 打开 http://127.0.0.1:8000
 ```
 
+首次打开会要求创建管理员账户；系统不提供默认用户名或密码。后续管理员可在右上角「••• → 系统设置 → 用户管理」中新增普通用户或其他管理员。
+
 ## Docker 部署
 
 ```bash
@@ -281,7 +299,7 @@ docker compose up -d --build
 
 ### 设置页（推荐新手）
 
-部署后打开面板，点击 **设置** Tab：
+部署后打开面板，以管理员账户点击右上角 **••• → 系统设置**：
 
 - **配置总览**：实时显示米家设备、小米云端、AI 工作台、SMTP、Agent Token 的状态与缺失项。
 - **米家设备**：直接增删改 `config/devices.yaml`；BLE Mesh 设备需填 did。
@@ -315,6 +333,37 @@ devices:
     type: light
     # siid: 3   # 双键开关右键可选
 ```
+
+**空调目标温度（可选，必须按实际 model 核实）：**
+
+```yaml
+# WiFi miio 空调
+- name: 卧室空调
+  model: your.aircondition.model
+  host: 192.168.1.32
+  token: <32位hex token>
+  type: airconditioner
+  temperature:
+    min: 16
+    max: 30
+    step: 1
+    command: set_temperature       # 当前仅允许此白名单命令
+    # property: target_temperature # model 支持 get_prop 时再配置
+
+# BLE / 云端 MIOT 空调
+- name: 客厅空调
+  model: your.miot.model
+  did: "<设备 did>"
+  type: airconditioner
+  temperature:
+    min: 16
+    max: 30
+    step: 1
+    siid: 2                        # 必须按该 model 的 MIOT Spec 核实
+    piid: 3
+```
+
+未确认命令或 MIOT Spec 时不要添加 `temperature`；设备仍可保留已有开关控制，不会显示无效温控。
 
 ### 获取 Token / DID
 
@@ -368,6 +417,8 @@ python -m app.modules.uptime    # 无 DB 不崩
 python -m app.modules.todos     # 待办提醒格式与时间解析
 python -m app.modules.notify    # 周报文本与收件人解析
 python -m app.modules.ai_workbench # AI 白名单校验
+python -m app.modules.auth      # 密码散列、会话摘要与用户名校验
+python -m app.modules.users     # 角色校验与管理员保护
 ```
 
 各模块均提供 `python -m app.modules.<name>` 自检（无 pytest）。
@@ -378,12 +429,22 @@ python -m app.modules.ai_workbench # AI 白名单校验
 
 ### 已实现
 
+除首个管理员初始化、登录/退出和 `/api/agent/todos/*` 外，下列面板 API 均要求浏览器携带有效的 `homedash_session` Cookie；`/api/setup/*` 与 `/api/admin/*` 还要求管理员角色。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/devices` | 设备列表（无内部 `_inst`） |
+| GET / POST | `/api/auth/bootstrap-status`、`/bootstrap-admin` | 首个管理员初始化 |
+| POST | `/api/auth/login`、`/logout` | 登录并设置长期 Cookie、退出并废止会话 |
+| GET | `/api/auth/me` | 当前登录用户 |
+| GET / POST | `/api/admin/users` | 管理员查看或新增用户/管理员 |
+| PUT / DELETE | `/api/admin/users/{id}` | 管理员修改角色/状态或删除用户 |
+| PUT | `/api/admin/users/{id}/password` | 管理员重置密码并废止该用户会话 |
+| GET | `/api/devices` | 已排序可见设备；仅返回安全展示字段与能力范围 |
 | GET | `/api/devices?include_hidden=true` | 含隐藏设备的管理列表 |
+| PUT | `/api/devices/order` | 完整保存全局自由顺序 |
 | PUT | `/api/devices/{name}/visibility` | 隐藏或恢复设备展示 |
-| GET | `/api/devices/status` | online / power / updated_at / error（best-effort） |
+| GET | `/api/devices/status` | online / power / target_temperature / updated_at / error（best-effort） |
+| PUT | `/api/devices/{name}/temperature` | 设置已声明能力空调的目标温度 |
 | POST | `/api/devices/{name}/on` | 开 |
 | POST | `/api/devices/{name}/off` | 关 |
 | POST | `/api/devices/{name}/command` | 自定义命令（仅 WiFi） |
@@ -431,6 +492,8 @@ homedash/
 │   ├── xiaomi_login.py
 │   ├── discover_devices.py
 │   ├── modules/
+│   │   ├── auth.py           # ✅ 登录与长期会话
+│   │   ├── users.py          # ✅ 管理员用户管理
 │   │   ├── devices.py        # ✅ 米家
 │   │   ├── uptime.py         # ✅ Kuma
 │   │   ├── items.py          # ✅ 日用品

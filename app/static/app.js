@@ -1,11 +1,21 @@
 // HomeDash 前端：vanilla JS，单页家庭管理 Tab
 
 const API = {
+  bootstrapStatus: '/api/auth/bootstrap-status',
+  bootstrapAdmin: '/api/auth/bootstrap-admin',
+  login: '/api/auth/login',
+  logout: '/api/auth/logout',
+  me: '/api/auth/me',
+  users: '/api/admin/users',
+  user: (id) => `/api/admin/users/${id}`,
+  userPassword: (id) => `/api/admin/users/${id}/password`,
   devices: '/api/devices',
   deviceStatus: '/api/devices/status',
   deviceOn: (name) => `/api/devices/${encodeURIComponent(name)}/on`,
   deviceOff: (name) => `/api/devices/${encodeURIComponent(name)}/off`,
   deviceVisibility: (name) => `/api/devices/${encodeURIComponent(name)}/visibility`,
+  deviceOrder: '/api/devices/order',
+  deviceTemperature: (name) => `/api/devices/${encodeURIComponent(name)}/temperature`,
   uptime: '/api/uptime/status',
   items: '/api/items',
   item: (id) => `/api/items/${id}`,
@@ -67,6 +77,11 @@ let aiConfidence = 'low';
 let setupStatusData = null;
 let xiaomiLoginStateId = null;
 let itemCategoryTimer = null;
+let currentUser = null;
+let deviceManageMode = false;
+let draggedDeviceName = null;
+let draggedDeviceElement = null;
+let deviceOrderSaving = false;
 
 // ============ 工具函数 ============
 
@@ -80,6 +95,7 @@ async function fetchJSON(url, opts = {}) {
   if (text) {
     try { data = JSON.parse(text); } catch { data = { detail: text }; }
   }
+  if (res.status === 401 && !url.startsWith('/api/auth/')) renderAuthForm(false);
   return { ok: res.ok, status: res.status, data };
 }
 
@@ -219,34 +235,63 @@ function isPowerOn(power) {
   return power === true || power === 'on' || power === 1 || power === '1' || power === 'true';
 }
 
+function temperatureOptions(capability, current) {
+  const options = ['<option value="">选择温度</option>'];
+  for (let value = capability.min; value <= capability.max + 1e-7; value += capability.step) {
+    const clean = parseFloat(value.toFixed(6));
+    options.push(`<option value="${clean}" ${Number(current) === clean ? 'selected' : ''}>${clean}℃</option>`);
+  }
+  return options.join('');
+}
+
+function renderTemperatureControl(dev, status) {
+  const capability = dev.capabilities?.temperature;
+  if (!capability) return '';
+  const target = Number.isFinite(Number(status?.target_temperature)) && status?.target_temperature !== null
+    ? Number(status.target_temperature) : null;
+  const lower = target === null ? null : parseFloat((target - capability.step).toFixed(6));
+  const upper = target === null ? null : parseFloat((target + capability.step).toFixed(6));
+  return `<div class="temperature-control">
+    <div class="temperature-label">目标温度 <b>${target === null ? '未知' : `${target}℃`}</b></div>
+    <div class="temperature-actions">
+      <button class="temperature-step" data-name="${esc(dev.name)}" data-temperature="${lower ?? ''}" ${lower === null || lower < capability.min ? 'disabled' : ''}>−</button>
+      <select class="temperature-select" data-name="${esc(dev.name)}" aria-label="${esc(dev.name)}目标温度">${temperatureOptions(capability, target)}</select>
+      <button class="temperature-step" data-name="${esc(dev.name)}" data-temperature="${upper ?? ''}" ${upper === null || upper > capability.max ? 'disabled' : ''}>＋</button>
+    </div>
+  </div>`;
+}
+
 function renderDeviceCard(dev) {
   const status = deviceStatusMap[dev.name];
   const online = status?.online;
   const powerOn = isPowerOn(status?.power);
-  const noHost = !dev.host;
-  const isCloud = dev.did && noHost;  // BLE Mesh 设备走云端
+  const isCloud = dev.connection === 'cloud';
   const statusText = online === true ? '在线' : (online === false ? '离线' : '状态未知');
   const badge = isCloud ? '<span class="badge badge-cloud">云端</span>' :
-    (noHost ? '<span class="badge badge-warn">无 IP</span>' : '');
-  const disabled = noHost && !isCloud;
+    (dev.connection === 'unknown' ? '<span class="badge badge-warn">未配置连接</span>' : '');
+  const disabled = dev.connection === 'unknown';
   const tileClass = [
     'device-tile',
     powerOn ? 'on' : 'off',
     online === false ? 'offline' : '',
+    deviceManageMode ? 'editing' : '',
   ].filter(Boolean).join(' ');
 
   const updated = status?.updated_at ? ` · 更新 ${status.updated_at.slice(11, 16)}` : '';
   const error = status?.error ? `<div class="device-error">${esc(status.error)}</div>` : '';
 
   return `
-    <div class="${tileClass}" data-name="${esc(dev.name)}">
+    <div class="${tileClass}" data-name="${esc(dev.name)}" draggable="${deviceManageMode}">
       <div class="device-tile-top">
         <div class="device-icon ${powerOn ? 'on' : ''}">${getDeviceEmoji(dev.type)}</div>
-        <label class="switch" title="${disabled ? '不可控' : (powerOn ? '关闭' : '开启')}">
+        ${deviceManageMode ? `<div class="device-edit-actions">
+          <button class="drag-handle" type="button" title="拖动排序" aria-label="拖动 ${esc(dev.name)}">☰</button>
+          <button class="btn btn-small device-visibility" type="button" data-name="${esc(dev.name)}" data-hidden="true">隐藏</button>
+        </div>` : `<label class="switch" title="${disabled ? '不可控' : (powerOn ? '关闭' : '开启')}">
           <input type="checkbox" class="power-switch" data-name="${esc(dev.name)}"
             ${powerOn ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
           <span class="slider"></span>
-        </label>
+        </label>`}
       </div>
       <div>
         <div class="device-name">${esc(dev.name)}</div>
@@ -256,56 +301,34 @@ function renderDeviceCard(dev) {
           ${badge}
         </div>
         ${error}
+        ${deviceManageMode ? '' : renderTemperatureControl(dev, status)}
       </div>
     </div>`;
 }
 
 function renderDevices() {
   const container = document.getElementById('tab-devices');
-  if (!devicesData.length) {
-    container.innerHTML = `
-      <div class="toolbar">
-        <button class="btn" id="manage-devices-btn">管理设备</button>
-      </div>
-      <div class="empty-state">
-        暂无可见设备，请在「管理设备」中恢复，或编辑 config/devices.yaml
-      </div>`;
-    bindDeviceManager();
-    return;
-  }
-
-  // 按组分类
-  const groups = {};
-  devicesData.forEach((dev) => {
-    const info = getGroupInfo(dev.type);
-    if (!groups[info.key]) groups[info.key] = { info, items: [] };
-    groups[info.key].items.push(dev);
-  });
-
-  // 保持分组顺序
-  const orderedKeys = ['light', 'airconditioner', 'airpurifier', 'plug', 'camera', 'cooker', 'feeder', 'speaker', 'other'];
-  const sortedKeys = orderedKeys.filter((k) => groups[k]).concat(Object.keys(groups).filter((k) => !orderedKeys.includes(k)));
-
+  const visible = devicesData.filter((device) => !device.hidden);
+  const hidden = devicesData.filter((device) => device.hidden);
   let html = `
     <div class="toolbar">
-      <button class="btn" id="manage-devices-btn">管理设备</button>
-      <button class="btn" id="refresh-status-btn">刷新状态</button>
+      <button class="btn ${deviceManageMode ? 'btn-primary' : ''}" id="manage-devices-btn">${deviceManageMode ? '完成管理' : '管理设备'}</button>
+      ${deviceManageMode ? '' : '<button class="btn" id="refresh-status-btn">刷新状态</button>'}
     </div>`;
-
-  sortedKeys.forEach((key) => {
-    const g = groups[key];
-    html += `
-      <div class="group">
-        <div class="group-title">${g.info.icon} ${g.info.label} · ${g.items.length}</div>
-        <div class="device-grid">
-          ${g.items.map(renderDeviceCard).join('')}
-        </div>
-      </div>`;
-  });
+  if (deviceManageMode) html += '<div class="device-manager-help">拖动任意设备调整全局顺序；隐藏不会删除设备或修改配置。</div>';
+  html += visible.length
+    ? `<div class="device-grid ${deviceManageMode ? 'device-sort-grid' : ''}">${visible.map(renderDeviceCard).join('')}</div>`
+    : '<div class="empty-state">暂无可见设备</div>';
+  if (deviceManageMode) {
+    html += `<div class="hidden-devices-section">
+      <div class="group-title">已隐藏设备 · ${hidden.length}</div>
+      <div class="hidden-device-list">${hidden.map((device) => `<div class="hidden-device-row"><span>${getDeviceEmoji(device.type)} ${esc(device.name)}</span><button class="btn btn-small device-visibility" data-name="${esc(device.name)}" data-hidden="false">恢复显示</button></div>`).join('') || '<div class="empty-state">没有隐藏设备</div>'}</div>
+    </div>`;
+  }
 
   container.innerHTML = html;
   bindDeviceEvents();
-  bindDeviceManager();
+  document.getElementById('manage-devices-btn')?.addEventListener('click', toggleDeviceManagement);
   document.getElementById('refresh-status-btn')?.addEventListener('click', refreshDeviceStatus);
 }
 
@@ -316,11 +339,24 @@ function bindDeviceEvents() {
       toggleDevice(name, e.target.checked, e.target);
     });
   });
-
+  document.querySelectorAll('#tab-devices .device-visibility').forEach((button) => button.addEventListener('click', () => setDeviceVisibility(button.dataset.name, button.dataset.hidden === 'true')));
+  document.querySelectorAll('#tab-devices .temperature-step').forEach((button) => button.addEventListener('click', () => setDeviceTemperature(button.dataset.name, Number(button.dataset.temperature), button)));
+  document.querySelectorAll('#tab-devices .temperature-select').forEach((select) => select.addEventListener('change', () => {
+    if (select.value !== '') setDeviceTemperature(select.dataset.name, Number(select.value), select);
+  }));
+  if (deviceManageMode) bindDeviceSorting();
 }
 
-function bindDeviceManager() {
-  document.getElementById('manage-devices-btn')?.addEventListener('click', showDeviceManager);
+async function setDeviceTemperature(name, temperature, control) {
+  if (!Number.isFinite(temperature)) return;
+  control.disabled = true;
+  const { ok, data } = await fetchJSON(API.deviceTemperature(name), { method: 'PUT', body: JSON.stringify({ temperature }) });
+  control.disabled = false;
+  if (!ok) { toast(data?.detail || `${name} 温度设置失败`, 'error'); return; }
+  if (!deviceStatusMap[name]) deviceStatusMap[name] = { name };
+  deviceStatusMap[name].target_temperature = data.target_temperature;
+  toast(`${name} 已设为 ${data.target_temperature}℃`, 'success');
+  renderDevices();
 }
 
 async function refreshDeviceStatus() {
@@ -346,7 +382,7 @@ async function loadDevices() {
   const container = document.getElementById('tab-devices');
   container.innerHTML = '<div class="loading">加载设备中...</div>';
   const [listRes, statusRes] = await Promise.all([
-    fetchJSON(API.devices),
+    fetchJSON(`${API.devices}?include_hidden=true`),
     fetchJSON(API.deviceStatus).catch(() => ({ ok: false, status: 404 })),
   ]);
 
@@ -369,7 +405,7 @@ async function preloadDeviceStatus() {
   // 预加载设备状态，进入设备页时可立即显示
   try {
     const [listRes, statusRes] = await Promise.all([
-      fetchJSON(API.devices),
+      fetchJSON(`${API.devices}?include_hidden=true`),
       fetchJSON(API.deviceStatus).catch(() => ({ ok: false })),
     ]);
     if (listRes.ok) devicesData = listRes.data || [];
@@ -382,27 +418,113 @@ async function preloadDeviceStatus() {
   }
 }
 
-async function showDeviceManager() {
-  const { ok, data } = await fetchJSON(`${API.devices}?include_hidden=true`);
-  if (!ok) { toast(data?.detail || '设备列表加载失败', 'error'); return; }
-  showModal(`
-    <div class="modal-content">
-      <div class="modal-header"><div class="modal-title">管理设备展示</div><button class="close-btn">&times;</button></div>
-      <p class="device-manager-help">隐藏只影响 HomeDash 页面，不会删除设备或修改配置。</p>
-      <div class="device-manager-list">${(data || []).map((device) => `
-        <div class="device-manager-row"><span>${device.name}</span><button class="btn btn-small device-visibility" data-name="${device.name}" data-hidden="${device.hidden}">${device.hidden ? '恢复显示' : '隐藏'}</button></div>
-      `).join('') || '<div class="empty-state">未配置设备</div>'}</div>
-    </div>`);
-  bindModalClose();
-  document.querySelectorAll('.device-visibility').forEach((button) => button.addEventListener('click', () => setDeviceVisibility(button.dataset.name, button.dataset.hidden !== 'true')));
+async function toggleDeviceManagement() {
+  deviceManageMode = !deviceManageMode;
+  if (!devicesData.length) await loadDevices();
+  else renderDevices();
 }
 
 async function setDeviceVisibility(name, hidden) {
   const { ok, data } = await fetchJSON(API.deviceVisibility(name), { method: 'PUT', body: JSON.stringify({ hidden }) });
   if (!ok) { toast(data?.detail || '更新设备展示失败', 'error'); return; }
   toast(hidden ? `${name} 已隐藏` : `${name} 已恢复显示`, 'success');
-  closeModal();
   loadDevices();
+}
+
+function mergedDeviceOrder() {
+  const visibleNames = [...document.querySelectorAll('#tab-devices .device-sort-grid .device-tile')].map((tile) => tile.dataset.name);
+  let visibleIndex = 0;
+  return devicesData.map((device) => device.hidden ? device.name : visibleNames[visibleIndex++]);
+}
+
+async function saveDeviceOrderFromDom() {
+  if (deviceOrderSaving) return;
+  const deviceNames = mergedDeviceOrder();
+  if (deviceNames.some((name) => !name)) return;
+  deviceOrderSaving = true;
+  const { ok, data } = await fetchJSON(API.deviceOrder, { method: 'PUT', body: JSON.stringify({ device_names: deviceNames }) });
+  deviceOrderSaving = false;
+  if (!ok) {
+    toast(data?.detail || '设备顺序保存失败', 'error');
+    loadDevices();
+    return;
+  }
+  const byName = Object.fromEntries(devicesData.map((device) => [device.name, device]));
+  devicesData = data.device_names.map((name) => byName[name]);
+  toast('设备顺序已保存', 'success');
+  renderDevices();
+}
+
+function moveDraggedBefore(target, clientX, clientY) {
+  const dragged = draggedDeviceElement;
+  if (!dragged || !target || dragged === target) return;
+  const rect = target.getBoundingClientRect();
+  const after = clientY > rect.top + rect.height / 2 || (Math.abs(clientY - (rect.top + rect.height / 2)) < rect.height / 3 && clientX > rect.left + rect.width / 2);
+  target.parentElement.insertBefore(dragged, after ? target.nextSibling : target);
+}
+
+function bindDeviceSorting() {
+  const grid = document.querySelector('#tab-devices .device-sort-grid');
+  if (!grid) return;
+  grid.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    const target = event.target.closest('.device-tile');
+    if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
+  });
+  grid.addEventListener('dragenter', (event) => {
+    event.preventDefault();
+    const target = event.target.closest('.device-tile');
+    if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
+  });
+  grid.addEventListener('drop', (event) => {
+    event.preventDefault();
+    const target = event.target.closest('.device-tile');
+    if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
+  });
+  grid.querySelectorAll('.device-tile').forEach((tile) => {
+    tile.addEventListener('dragstart', (event) => {
+      draggedDeviceName = tile.dataset.name;
+      draggedDeviceElement = tile;
+      tile.classList.add('dragging');
+      event.dataTransfer.effectAllowed = 'move';
+    });
+    tile.addEventListener('dragend', () => {
+      tile.classList.remove('dragging');
+      draggedDeviceName = null;
+      draggedDeviceElement = null;
+      saveDeviceOrderFromDom();
+    });
+  });
+  grid.querySelectorAll('.drag-handle').forEach((handle) => {
+    let active = false;
+    let timer = null;
+    const finish = () => {
+      clearTimeout(timer);
+      if (!active) return;
+      active = false;
+      handle.closest('.device-tile').classList.remove('dragging');
+      draggedDeviceName = null;
+      draggedDeviceElement = null;
+      saveDeviceOrderFromDom();
+    };
+    handle.addEventListener('pointerdown', (event) => {
+      timer = setTimeout(() => {
+        active = true;
+        draggedDeviceName = handle.closest('.device-tile').dataset.name;
+        draggedDeviceElement = handle.closest('.device-tile');
+        draggedDeviceElement.classList.add('dragging');
+        handle.setPointerCapture?.(event.pointerId);
+      }, 250);
+    });
+    handle.addEventListener('pointermove', (event) => {
+      if (!active) return;
+      event.preventDefault();
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.device-tile');
+      if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
+    });
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+  });
 }
 
 // ============ 监控 Tab ============
@@ -1185,7 +1307,36 @@ function initRefresh() {
     if (currentTab === 'ai') renderAiWorkbench();
     if (currentTab === 'setup') loadSetup();
   });
-  document.getElementById('settings-btn').addEventListener('click', () => switchTab('setup'));
+}
+
+function initAccountMenu() {
+  const button = document.getElementById('settings-btn');
+  const menu = document.getElementById('account-menu');
+  const closeMenu = () => {
+    menu.classList.add('hidden');
+    button.setAttribute('aria-expanded', 'false');
+  };
+  menu.innerHTML = `
+    <div class="account-menu-user">${esc(currentUser.username)}<small>${currentUser.role === 'admin' ? '管理员' : '普通用户'}</small></div>
+    ${currentUser.role === 'admin' ? '<button type="button" data-action="setup">系统设置</button>' : ''}
+    <button type="button" data-action="logout">退出登录</button>`;
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    menu.classList.toggle('hidden');
+    button.setAttribute('aria-expanded', String(!menu.classList.contains('hidden')));
+  });
+  menu.addEventListener('click', async (event) => {
+    const action = event.target.closest('button')?.dataset.action;
+    if (action === 'setup') {
+      closeMenu();
+      switchTab('setup');
+    }
+    if (action === 'logout') {
+      await fetchJSON(API.logout, { method: 'POST' });
+      window.location.reload();
+    }
+  });
+  document.addEventListener('click', closeMenu);
 }
 
 function initAutoRefresh() {
@@ -1197,13 +1348,78 @@ function initAutoRefresh() {
 
 // ============ 启动 ============
 
-function init() {
+function initApp() {
+  document.getElementById('auth-view').classList.add('hidden');
+  document.getElementById('app-shell').classList.remove('hidden');
   initTabs();
   initRefresh();
+  initAccountMenu();
   initAutoRefresh();
-  loadSetupBanner();
+  if (currentUser.role === 'admin') loadSetupBanner();
   preloadDeviceStatus();  // 预加载设备状态
   switchTab('ai');
+}
+
+function renderAuthForm(bootstrap, message = '') {
+  currentUser = null;
+  document.getElementById('app-shell').classList.add('hidden');
+  const view = document.getElementById('auth-view');
+  view.classList.remove('hidden');
+  view.innerHTML = `
+    <div class="auth-card">
+      <div class="auth-logo">🏠</div>
+      <h1>HomeDash</h1>
+      <p>${bootstrap ? '首次使用，请创建管理员账户' : '登录家庭管理面板'}</p>
+      <form id="auth-form">
+        <div class="form-group"><label for="auth-username">用户名</label><input id="auth-username" autocomplete="username" required minlength="2" maxlength="32"></div>
+        <div class="form-group"><label for="auth-password">密码</label><input id="auth-password" type="password" autocomplete="${bootstrap ? 'new-password' : 'current-password'}" required minlength="8" maxlength="128"></div>
+        ${bootstrap ? '<div class="form-group"><label for="auth-password-confirm">确认密码</label><input id="auth-password-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></div>' : ''}
+        <button class="btn btn-primary auth-submit" type="submit">${bootstrap ? '创建管理员并进入' : '登录'}</button>
+        <div id="auth-result" class="setup-result ${message ? 'error' : ''}">${esc(message)}</div>
+      </form>
+    </div>`;
+  document.getElementById('auth-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const username = document.getElementById('auth-username').value.trim();
+    const password = document.getElementById('auth-password').value;
+    const result = document.getElementById('auth-result');
+    if (bootstrap && password !== document.getElementById('auth-password-confirm').value) {
+      result.textContent = '两次输入的密码不一致';
+      result.className = 'setup-result error';
+      return;
+    }
+    const button = event.submitter;
+    button.disabled = true;
+    const response = await fetchJSON(bootstrap ? API.bootstrapAdmin : API.login, {
+      method: 'POST', body: JSON.stringify({ username, password }),
+    });
+    button.disabled = false;
+    if (!response.ok) {
+      result.textContent = response.data?.detail || (bootstrap ? '创建管理员失败' : '登录失败');
+      result.className = 'setup-result error';
+      return;
+    }
+    window.location.reload();
+  });
+}
+
+async function init() {
+  const bootstrap = await fetchJSON(API.bootstrapStatus);
+  if (!bootstrap.ok) {
+    renderAuthForm(false, bootstrap.data?.detail || '无法读取初始化状态');
+    return;
+  }
+  if (bootstrap.data.required) {
+    renderAuthForm(true);
+    return;
+  }
+  const me = await fetchJSON(API.me);
+  if (!me.ok) {
+    renderAuthForm(false);
+    return;
+  }
+  currentUser = me.data;
+  initApp();
 }
 
 document.addEventListener('DOMContentLoaded', init);
@@ -1265,6 +1481,23 @@ function renderSetup() {
         <div class="setup-status-item">${statusOptional(s.kuma_public_url_configured, 'Uptime 跳转（可选）')}</div>
       </div>
       ${s.missing && s.missing.length ? `<div class="setup-missing">待处理：${esc(s.missing.join('、'))}</div>` : '<div class="setup-ok">全部配置就绪 🎉</div>'}
+    </div>
+
+    <div class="card">
+      <div class="section-title">用户管理</div>
+      <div class="setup-help">管理员可以新增普通用户或其他管理员。禁用、删除或重置密码会立即使该用户的登录会话失效。</div>
+      <form id="user-create-form" class="setup-form">
+        <div class="form-row">
+          <div class="form-group"><label for="new-username">用户名</label><input id="new-username" placeholder="例如：家人" required minlength="2" maxlength="32" autocomplete="off"></div>
+          <div class="form-group"><label for="new-user-password">初始密码</label><input id="new-user-password" type="password" placeholder="至少 8 个字符" required minlength="8" maxlength="128" autocomplete="new-password"></div>
+        </div>
+        <div class="form-row user-create-actions">
+          <div class="form-group"><label for="new-user-role">角色</label><select id="new-user-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></div>
+          <div class="form-actions"><button type="submit" class="btn btn-primary">新增用户</button></div>
+        </div>
+        <div id="user-create-result" class="setup-result"></div>
+      </form>
+      <div id="user-list" class="setup-subsection"><div class="loading">加载用户中...</div></div>
     </div>
 
     <div class="card ${showDeviceSetup ? '' : 'hidden'}">
@@ -1386,6 +1619,7 @@ function renderSetup() {
   loadAppConfig();
   loadLlmConfig();
   loadNotifyConfig();
+  loadUsers();
 }
 
 function bindSetupEvents() {
@@ -1401,6 +1635,95 @@ function bindSetupEvents() {
   document.getElementById('setup-notify-form').addEventListener('submit', saveNotifyConfig);
   document.getElementById('notify-test-only-btn').addEventListener('click', testNotifyConfig);
   document.getElementById('notify-send-test-btn').addEventListener('click', sendTestNotify);
+  document.getElementById('user-create-form').addEventListener('submit', createManagedUser);
+}
+
+async function loadUsers() {
+  const container = document.getElementById('user-list');
+  if (!container) return;
+  const { ok, data } = await fetchJSON(API.users);
+  if (!ok) {
+    container.innerHTML = `<div class="setup-result error">${esc(data?.detail || '用户列表加载失败')}</div>`;
+    return;
+  }
+  container.innerHTML = `<div class="setup-list">${data.map((user) => {
+    const self = user.id === currentUser.id;
+    return `<div class="setup-list-item user-list-item" data-user-id="${user.id}">
+      <div class="user-summary"><b>${esc(user.username)}</b>${self ? '<span class="tag">当前账户</span>' : ''}<small>最后登录：${esc(user.last_login_at || '尚未登录')}</small></div>
+      <div class="user-fields">
+        <select class="managed-user-role" ${self ? 'disabled' : ''}><option value="user" ${user.role === 'user' ? 'selected' : ''}>普通用户</option><option value="admin" ${user.role === 'admin' ? 'selected' : ''}>管理员</option></select>
+        <label><input class="managed-user-enabled" type="checkbox" ${user.enabled ? 'checked' : ''} ${self ? 'disabled' : ''}> 启用</label>
+      </div>
+      <div class="setup-list-actions">
+        ${self ? '' : '<button class="btn btn-small" data-action="save-user">保存</button>'}
+        <button class="btn btn-small" data-action="reset-password">重置密码</button>
+        ${self ? '' : '<button class="btn btn-small btn-danger" data-action="delete-user">删除</button>'}
+      </div>
+    </div>`;
+  }).join('')}</div>`;
+  container.querySelectorAll('[data-action="save-user"]').forEach((button) => button.addEventListener('click', () => updateManagedUser(button.closest('.user-list-item'))));
+  container.querySelectorAll('[data-action="reset-password"]').forEach((button) => button.addEventListener('click', () => showPasswordReset(Number(button.closest('.user-list-item').dataset.userId))));
+  container.querySelectorAll('[data-action="delete-user"]').forEach((button) => button.addEventListener('click', () => deleteManagedUser(Number(button.closest('.user-list-item').dataset.userId))));
+}
+
+async function createManagedUser(event) {
+  event.preventDefault();
+  const result = document.getElementById('user-create-result');
+  const payload = {
+    username: document.getElementById('new-username').value.trim(),
+    password: document.getElementById('new-user-password').value,
+    role: document.getElementById('new-user-role').value,
+  };
+  const { ok, data } = await fetchJSON(API.users, { method: 'POST', body: JSON.stringify(payload) });
+  result.textContent = ok ? '用户已新增' : (data?.detail || '新增用户失败');
+  result.className = `setup-result ${ok ? 'success' : 'error'}`;
+  if (ok) {
+    event.target.reset();
+    loadUsers();
+  }
+}
+
+async function updateManagedUser(row) {
+  const userId = Number(row.dataset.userId);
+  const payload = {
+    role: row.querySelector('.managed-user-role').value,
+    enabled: row.querySelector('.managed-user-enabled').checked,
+  };
+  const { ok, data } = await fetchJSON(API.user(userId), { method: 'PUT', body: JSON.stringify(payload) });
+  toast(ok ? '用户信息已保存' : (data?.detail || '保存失败'), ok ? 'success' : 'error');
+  if (ok) loadUsers();
+}
+
+function showPasswordReset(userId) {
+  showModal(`<div class="modal-content">
+    <div class="modal-header"><div class="modal-title">重置用户密码</div><button class="close-btn">&times;</button></div>
+    <div class="form-group"><label>新密码（至少 8 个字符）</label><input id="managed-new-password" type="password" minlength="8" maxlength="128" autocomplete="new-password"></div>
+    <div class="form-group"><label>确认新密码</label><input id="managed-new-password-confirm" type="password" minlength="8" maxlength="128" autocomplete="new-password"></div>
+    <div class="form-actions"><button class="btn modal-cancel">取消</button><button class="btn btn-primary" id="save-managed-password">确认重置</button></div>
+  </div>`);
+  bindModalClose();
+  document.getElementById('save-managed-password').addEventListener('click', async () => {
+    const password = document.getElementById('managed-new-password').value;
+    if (password !== document.getElementById('managed-new-password-confirm').value) {
+      toast('两次输入的密码不一致', 'error');
+      return;
+    }
+    const { ok, data } = await fetchJSON(API.userPassword(userId), { method: 'PUT', body: JSON.stringify({ password }) });
+    if (!ok) {
+      toast(data?.detail || '密码重置失败', 'error');
+      return;
+    }
+    closeModal();
+    toast('密码已重置，该用户需要重新登录', 'success');
+    if (userId === currentUser.id) setTimeout(() => window.location.reload(), 800);
+  });
+}
+
+async function deleteManagedUser(userId) {
+  if (!confirm('确定删除该用户吗？删除后无法恢复，该用户会立即退出登录。')) return;
+  const { ok, data } = await fetchJSON(API.user(userId), { method: 'DELETE' });
+  toast(ok ? '用户已删除' : (data?.detail || '删除失败'), ok ? 'success' : 'error');
+  if (ok) loadUsers();
 }
 
 async function loadDeviceList() {

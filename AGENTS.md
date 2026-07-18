@@ -148,7 +148,7 @@ python -m app.modules.uptime
 
 | 模块文件 | 状态 | 职责 |
 |----------|------|------|
-| `app/modules/devices.py` | ✅ | 米家开关/命令/status/云控/展示隐藏 |
+| `app/modules/devices.py` | ✅ | 米家开关/命令/status/云控、展示隐藏、全局排序、显式空调温控 |
 | `app/modules/uptime.py` | ✅ | Kuma 只读 + 缓存 |
 | `app/modules/items.py` | ✅ | 日用品 + EWMA / 安全库存预测 |
 | `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API |
@@ -156,7 +156,9 @@ python -m app.modules.uptime
 | `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、字段归一、全流程审计（parse/apply 成败均落库 + before/after 快照） |
 | `app/modules/ai_executor.py` | ✅ | 白名单写库；`_item_name` 归一 name/item_name |
 | `app/modules/setup.py` | ✅ | 配置状态、米家设备/云端登录、LLM 配置 |
-| `app/database.py` | ✅ | 单例 DB；`_ensure_columns` 给旧库容错补列 |
+| `app/modules/auth.py` | ✅ | 首个管理员、scrypt 密码、180 天长期会话、面板 API 鉴权依赖 |
+| `app/modules/users.py` | ✅ | 管理员用户 CRUD、角色边界、重置密码与会话废止 |
+| `app/database.py` | ✅ | 单例 DB；业务表 + `users` / `auth_sessions`；`_ensure_columns` 给旧库补列（含设备 sort_order） |
 | `app/static/*` | ✅ 六 Tab | 米家浅色：设备、监控、日用品、重点待办、AI、设置 |
 
 ## 架构要点（非看文件不可知）
@@ -164,8 +166,9 @@ python -m app.modules.uptime
 - **DB 单例**：`_db` 全局；不要 per-request 新连接玩法。  
 - **库存方向**：`/usage` 减，`/purchase` 加。  
 - **predict_item**：相邻 usage 区间 EWMA；安全库存取 `max(min_stock, rate * LEAD_DAYS)`；无/少 usage 时依次走购买间隔、品类先验、最低库存兜底。
-- **devices**：`_POWER_CMDS`；`_inst` 不下发；BLE `_cloud_miot_*`；展示隐藏仅存 `device_preferences`，不改 YAML；双重 startup 加载无害。
+- **devices**：`_POWER_CMDS`；`_inst` 不下发；BLE `_cloud_miot_*`；隐藏/全局顺序仅存 `device_preferences`，不改 YAML；温控必须由 YAML 显式声明且协议参数不下发前端；双重 startup 加载无害。
 - **uptime**：`mode=ro`，60s 缓存。  
+- **auth**：面板 API 默认要求 `homedash_session`；设置/用户管理仅管理员；`/api/agent/todos/*` 仍走独立 `AGENT_API_TOKEN`。
 - **文档一致性**：同一 API/状态改一处必须改 README + DEVPLAN + 本文相关句。
 
 ## 配置与环境变量
@@ -177,7 +180,7 @@ python -m app.modules.uptime
 
 ## 当前阶段
 
-- ✅ Phase 1–3 + status + Docker + 米家浅色五 Tab + EWMA 预测 + 重点待办 + SMTP 周报 + AI 工作台 + 设备展示管理
+- ✅ Phase 1–3 + status + Docker + 米家浅色五 Tab + EWMA 预测 + 重点待办 + SMTP 周报 + AI 工作台 + 登录/用户权限 + 设备页内管理/全局排序/空调温控
 - ⬜ DEVPLAN：无未完成核心待办
 - 以**代码**与 **README 状态表**为准；DESIGN 仅作设计背景  
 

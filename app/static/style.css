@@ -58,6 +58,38 @@ header h1 {
   gap: 0.45rem;
 }
 
+.account-menu-wrap { position: relative; }
+.account-menu {
+  position: absolute;
+  right: 0;
+  top: 46px;
+  z-index: 80;
+  min-width: 170px;
+  padding: 0.4rem;
+  background: #fff;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.account-menu button {
+  width: 100%;
+  padding: 0.62rem 0.7rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.account-menu button:hover { background: #f5f7fa; }
+.account-menu-user {
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+.account-menu-user small { display: block; color: var(--muted); font-weight: 400; }
+
 #refresh-btn,
 #settings-btn {
   width: 40px;
@@ -196,6 +228,7 @@ main {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.7rem;
+  margin-bottom: 0.9rem;
 }
 
 .device-tile {
@@ -214,6 +247,34 @@ main {
 .device-tile:active { transform: scale(0.985); }
 .device-tile.off { opacity: 0.92; }
 .device-tile.offline { opacity: 0.75; }
+.device-tile.editing {
+  border: 1px dashed #9bb7ce;
+  cursor: grab;
+  user-select: none;
+}
+.device-tile.dragging {
+  opacity: 0.5;
+  transform: scale(0.97);
+  box-shadow: 0 12px 30px rgba(47,124,246,0.2);
+}
+
+.device-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.drag-handle {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  background: #eef3f8;
+  color: #567086;
+  cursor: grab;
+  font-size: 1rem;
+  touch-action: none;
+}
+.drag-handle:active { cursor: grabbing; }
 
 .device-tile-top {
   display: flex;
@@ -636,6 +697,72 @@ main {
 
 .hidden { display: none !important; }
 
+/* ============ 登录页 ============ */
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.2rem;
+}
+
+.temperature-control {
+  margin-top: 0.65rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+.temperature-label {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.temperature-label b { color: var(--text); }
+.temperature-actions {
+  display: grid;
+  grid-template-columns: 34px 1fr 34px;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+.temperature-actions button,
+.temperature-actions select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #f5f7fa;
+  color: var(--text);
+}
+.temperature-actions button { cursor: pointer; font-size: 1rem; }
+.temperature-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.temperature-actions select { min-width: 0; padding: 0 0.35rem; }
+
+.hidden-devices-section {
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border-radius: var(--radius);
+  background: rgba(255,255,255,0.62);
+}
+.hidden-device-list { display: flex; flex-direction: column; gap: 0.45rem; }
+.hidden-device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.6rem 0.7rem;
+  border-radius: 10px;
+  background: #fff;
+}
+.auth-card {
+  width: min(100%, 390px);
+  padding: 1.6rem;
+  background: rgba(255,255,255,0.96);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.auth-logo { text-align: center; font-size: 2.4rem; }
+.auth-card h1 { margin-top: 0.25rem; text-align: center; font-size: 1.5rem; }
+.auth-card > p { margin: 0.35rem 0 1.2rem; color: var(--muted); text-align: center; }
+.auth-submit { width: 100%; min-height: 42px; }
+
 /* ============ 设置页 ============ */
 .setup-banner {
   background: #fff7e6;
@@ -771,6 +898,15 @@ main {
   display: flex;
   gap: 0.4rem;
 }
+
+.user-list-item { align-items: flex-start; flex-wrap: wrap; }
+.user-summary { display: flex; min-width: 150px; flex: 1; flex-direction: column; gap: 0.2rem; }
+.user-summary b { display: flex; align-items: center; gap: 0.35rem; }
+.user-summary small { color: var(--muted); }
+.user-fields { display: flex; align-items: center; gap: 0.6rem; }
+.user-fields select { padding: 0.4rem; border: 1px solid #ddd; border-radius: 7px; background: #fff; }
+.user-fields label { display: flex; align-items: center; gap: 0.25rem; white-space: nowrap; }
+.user-create-actions { align-items: end; }
 
 #llm-model-list .setup-list {
   flex-direction: row;

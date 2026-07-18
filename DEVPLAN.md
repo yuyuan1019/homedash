@@ -269,6 +269,8 @@ Content-Type: application/json
 
 **完成情况（2026-07-13）**：已新增 `device_preferences` 展示偏好表、设备隐藏/恢复 API 和设备页管理弹窗。隐藏状态持久化于 SQLite，不改 YAML；默认设备列表与状态刷新跳过隐藏设备。状态响应新增 `updated_at` 与脱敏 `error`，并已移除未实现的设备属性和粘贴导入假入口。
 
+> 后续待办 10 已将本待办的管理弹窗替换为设备页内编辑模式，并在原偏好表上增加全局排序。
+
 **目标**：设备页保持现有开关控制，补充可解释的在线状态；用户可隐藏不想在面板展示的设备，并随时恢复。隐藏只影响 HomeDash 展示，绝不修改 `config/devices.yaml`、不删除设备凭据、不下发设备命令。
 
 ### 3A.1 数据与接口
@@ -649,7 +651,7 @@ AI 工作台一期即包含 `todo.create` / `todo.complete` / `todo.update` 等 
 
 - **HomeDash 内不实现**微信/QQ 登录协议、iPad 协议、企业微信机器人本体
 - 不做子任务 / 看板 / 番茄钟
-- 不做多人登录权限（assignee 只是标签）
+- 本待办 8 不做多人登录权限（assignee 只是标签）；后续已由独立待办 9 规划，不属于待办 8 的实现范围
 - 不做 Google Calendar 同步
 - 不在公网裸奔无 token 的 agent API
 
@@ -966,6 +968,235 @@ CREATE TABLE IF NOT EXISTS ai_audit (
 
 4. 模型返回非法 op 或 SQL 字符串 → 拒绝，库不变
 ```
+
+---
+
+## 待办 9：面板登录、长期会话与管理员用户管理 — **已完成**
+
+**完成情况（2026-07-17）**：已新增 `users` / `auth_sessions` 表、`app/modules/auth.py`、`app/modules/users.py` 与统一面板 API 鉴权。首次启动创建管理员，密码使用标准库 `scrypt` 散列；会话 Cookie 默认 180 天并滑动续期，数据库只保存 token 摘要。普通用户可使用业务功能但无法访问 `/api/setup/*` 与 `/api/admin/*`；管理员可在设置页新增普通用户/管理员、启停、重置密码和删除用户。右上角已改为三点账户菜单；现有 `/api/agent/todos/*` 继续使用独立 `AGENT_API_TOKEN`。
+
+**目标**：HomeDash 面板不再匿名访问。用户首次用用户名和密码登录后获得长期会话，日常使用基本无需重复登录；区分普通用户与管理员，只有管理员可以进入系统设置并管理用户。
+
+> 本待办只给浏览器面板及其业务 API 增加认证。现有 `/api/agent/todos/*` 继续使用 `AGENT_API_TOKEN`，不要求外部 Hermes / home agent 建立浏览器会话。
+
+### 9.1 角色与权限
+
+| 能力 | 普通用户 `user` | 管理员 `admin` |
+|------|-----------------|----------------|
+| 登录、退出、查看自己的账户信息 | ✅ | ✅ |
+| 使用设备、监控、日用品、重点待办、AI 工作台 | ✅ | ✅ |
+| 在设备页隐藏/恢复设备、自由排序、调节已声明能力的空调温度 | ✅ | ✅ |
+| 查看或调用 `/api/setup/*` 系统配置 | ❌ | ✅ |
+| 查看用户列表、新增/禁用/删除用户、重置密码 | ❌ | ✅ |
+| 创建另一个管理员 | ❌ | ✅ |
+
+- 权限必须在 FastAPI 后端校验；前端隐藏入口只负责交互，不能作为安全边界。
+- 未登录访问面板业务 API 返回中文 `401`；普通用户访问管理员 API 返回中文 `403`。
+- 普通用户右上角“三个点”菜单只显示「退出登录」；管理员菜单显示「系统设置」「退出登录」。
+- 普通用户不渲染设置 Tab；直接请求或构造管理员 URL 仍必须被后端拒绝。
+- 管理员权限覆盖现有全部 `/api/setup/*`，包括米家凭据、设备 YAML、LLM、SMTP、应用配置及测试接口。
+
+### 9.2 首个管理员与登录流程
+
+- 数据库无用户时，仅允许进入「创建首个管理员」初始化页；创建成功后关闭公开初始化入口。
+- 不内置 `admin/admin` 等默认账号，不在代码、文档、镜像或 `.env.example` 中写默认密码。
+- 登录成功设置长期会话 Cookie，默认有效期 **180 天**；正常使用可滑动续期，达到长期免登录效果。
+- Cookie 必须使用 `HttpOnly`、`SameSite=Lax`、`Path=/`；HTTPS 部署时启用 `Secure`。前端不得把密码或会话 token 写入 `localStorage` / `sessionStorage`。
+- 退出登录、账户被禁用/删除、密码被重置时，立即废止相关会话。
+- 前端启动先请求当前用户；未登录显示登录/初始化页面，登录后进入 SPA；任意业务请求收到 `401` 时统一回登录页。
+
+### 9.3 数据模型
+
+在 `app/database.py` 的 `SCHEMA` 新增：
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_seen_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+```
+
+- `role` 只允许 `user` / `admin`；服务端写入前做白名单校验。
+- 密码使用 Python 标准库 `hashlib.scrypt` + 每用户随机 salt；不新增认证 SDK，不保存明文或可逆密码。
+- 会话原始 token 使用 `secrets.token_urlsafe` 生成，只放 Cookie；数据库只保存摘要，日志和 API 不得返回原始 token。
+- 登录失败统一返回「用户名或密码错误」，不得泄露用户名是否存在。
+- 可在读取有效会话时顺便删除过期会话；本期不引入 Redis、定时清理服务或连接池。
+
+### 9.4 API
+
+```http
+GET  /api/auth/bootstrap-status       # 是否需要创建首个管理员
+POST /api/auth/bootstrap-admin        # 仅 users 为空时可调用
+POST /api/auth/login                  # 设置长期 HttpOnly Cookie
+POST /api/auth/logout                 # 清除当前会话与 Cookie
+GET  /api/auth/me                     # 当前用户 id/username/role
+
+GET    /api/admin/users               # 管理员：用户列表，不返回密码字段
+POST   /api/admin/users               # 管理员：新增 user/admin
+PUT    /api/admin/users/{id}          # 管理员：角色、启用状态等白名单字段
+PUT    /api/admin/users/{id}/password # 管理员：重置密码并废止该用户全部会话
+DELETE /api/admin/users/{id}          # 管理员：删除用户并废止会话
+```
+
+- 管理员不能删除、禁用或降级自己当前登录的账户。
+- 系统始终至少保留一个启用的管理员；删除、禁用或降级最后一个管理员必须返回中文 `400`。
+- 用户名去除首尾空白后唯一；长度、允许字符和密码最小长度由后端统一校验，错误返回中文 `detail`。
+- `/api/agent/todos/*` 保持现有 token 行为，不接收浏览器 Cookie 作为替代认证。
+- 静态登录页可匿名读取；除 bootstrap/login/logout 与必要静态资源外，现有面板 `/api/*` 均要求有效会话，再按管理员权限细分。
+
+### 9.5 前端
+
+- `index.html` 保持单页架构，增加登录态/初始化态容器，不引入前端框架。
+- 右上角按钮改为“三个点”菜单；普通用户只有退出，管理员增加系统设置。
+- 设置页增加「用户管理」区：用户列表、新增用户/管理员、禁用/启用、重置密码、删除。
+- 删除、禁用、重置密码等操作必须有中文确认提示；API 错误通过 toast 展示。
+- 不在 HTML、JS、日志或 toast 中展示密码哈希、salt、完整会话 token。
+
+### 9.6 实现文件（预估）
+
+- `app/modules/auth.py`：密码散列、会话、当前用户依赖、登录/退出/初始化 API
+- `app/modules/users.py`：管理员用户管理 API
+- `app/database.py`：`users` / `auth_sessions` 表与旧库兼容
+- `app/main.py`：挂载认证与用户路由，并统一保护面板业务 API
+- `app/static/index.html`、`app/static/app.js`、`app/static/style.css`：登录页、账户菜单、用户管理
+- README / AGENTS / 本文件：完成后同步实际行为、API、模块地图和状态
+
+### 9.7 验收
+
+1. 全新空数据库只能创建首个管理员；创建后再次调用 bootstrap 返回拒绝。
+2. 管理员登录后可刷新页面、重启服务并继续使用；Cookie 中没有明文密码，数据库没有原始 session token。
+3. 普通用户可使用业务页面，但看不到系统设置；直接请求任一 `/api/setup/*` 或 `/api/admin/users*` 返回 `403`。
+4. 管理员可新增普通用户和另一个管理员；普通用户不能调用用户管理 API。
+5. 禁用/删除用户或重置密码后，该用户已有会话立即失效。
+6. 不能删除、禁用或降级当前管理员，也不能移除最后一个启用管理员。
+7. 退出后原 Cookie 无法再次访问业务 API；错误信息与 UI 文案均为中文。
+8. `python -m app.modules.auth` 与 `python -m app.modules.users` 自检覆盖密码校验、会话摘要、角色边界和最后管理员保护。
+9. 现有 `AGENT_API_TOKEN` 验收仍通过，外部 agent 接口不因浏览器登录改造而失效。
+
+### 9.8 明确不做
+
+- 不做 OAuth、微信/QQ 扫码登录、短信验证码、邮箱找回密码或第三方 SSO。
+- 不做复杂 RBAC、权限组、逐设备/逐物品授权；本期只有 `user` / `admin` 两种角色。
+- 不做“记住密码”明文存储，不把 token 放入 localStorage。
+- 不引入 ORM、Redis、认证服务器或重量级用户框架。
+- 不做用户自助注册；首个管理员创建完成后，只能由管理员新增账户。
+
+---
+
+## 待办 10：设备页内管理、全局自由排序与空调温控 — **已完成**
+
+**完成情况（2026-07-17）**：设备控制页已取消类型强制分组和管理弹窗，改为单一全局顺序网格；管理模式可在当前页隐藏/恢复，并支持桌面拖动和移动端长按拖动。`device_preferences` 新增 `sort_order`，完整顺序由事务更新，隐藏设备保留原位置。空调只有在 YAML 显式声明温控能力后才显示目标温度、加减和选择控件；WiFi 命令、查询属性及云端 MIOT `siid/piid` 均做白名单/显式校验，越界或步长错误不下发。普通设备列表仅返回安全展示字段，不再返回 token、host、did 或协议参数。
+
+**依赖**：先完成待办 9；设备展示管理与温控对普通用户、管理员均开放，但必须登录。
+
+**目标**：移除现有「管理设备展示」弹窗，直接在设备控制页完成隐藏、恢复和拖动排序；设备不再被类型分组强制排序，而是按全家共享的自由顺序展示。已明确声明温控能力的空调可在卡片上直接调节目标温度。
+
+### 10.1 页面内管理模式
+
+- 设备页「管理设备」按钮切换当前页面进入/退出编辑模式，不打开详情页或管理弹窗。
+- 编辑模式中每张卡片显示拖动手柄和「隐藏」按钮；页面下方显示隐藏设备区，可直接恢复。
+- 桌面端支持鼠标拖动，移动端支持触摸/长按拖动；不引入前端拖拽库。
+- 退出编辑模式后保留正常开关与温控卡片；编辑过程中避免误触开关。
+- 隐藏只影响 HomeDash 展示，不删除设备、不写回 `config/devices.yaml`、不改变设备控制 API 的可用性。
+
+### 10.2 全局自由排序
+
+- 扩展 `device_preferences`，新增 `sort_order INTEGER`；旧库通过 `_ensure_columns` 容错补列。
+- 排序是**所有用户共享的全局顺序**，不是每用户偏好。
+- 取消前端按灯光、空调、插座等类型分组后再固定排序；可把任意类型设备拖到任意位置。
+- 松手后一次提交完整设备名称顺序，后端校验名称无重复且与当前设备集合匹配，并在事务中更新。
+- 新出现且没有 `sort_order` 的设备排在已有顺序末尾；隐藏设备保留原顺序，恢复后回到原位置。
+- `GET /api/devices` 与 `GET /api/devices?include_hidden=true` 均按 `sort_order` 返回；相同/空顺序使用 YAML 原始顺序稳定兜底。
+
+建议接口：
+
+```http
+PUT /api/devices/order
+Content-Type: application/json
+
+{"device_names":["客厅空调","玄关灯","电视插座"]}
+```
+
+### 10.3 空调温控能力
+
+- 只有 `type: airconditioner` 且配置中显式声明温控能力的设备显示调温控件；不得仅凭名称或类型猜 `siid/piid`。
+- 建议在 `config/devices.yaml` 的对应设备增加可选配置：
+
+```yaml
+temperature:
+  min: 16
+  max: 30
+  step: 1
+  siid: 2       # BLE/云端 MIOT 使用
+  piid: 3       # BLE/云端 MIOT 使用
+  command: set_temperature  # WiFi miio 使用；按实际 model 配置
+```
+
+- `min` / `max` / `step` 必须由后端校验；默认值只能在规格明确且设备协议验证后使用，不能静默向未知设备发送命令。
+- BLE/云端设备通过已声明 `siid/piid` 调 MIOT 属性；WiFi 设备通过白名单 `command` 调用，并继续放入 `asyncio.to_thread`，不得阻塞事件循环。
+- 卡片显示目标温度与 `−` / `+` 控件；状态查询能可靠获取时同步目标温度，暂时不可获取时显示最后一次成功设置值或「温度未知」，不得伪装成实时室温。
+- 调温失败只影响当前设备，toast 显示脱敏中文错误，不输出 token、host、did 或异常栈。
+- 新增专用白名单接口，不要求前端拼接 `/command` 原始命令：
+
+```http
+PUT /api/devices/{name}/temperature
+Content-Type: application/json
+
+{"temperature":26}
+```
+
+### 10.4 数据与返回字段
+
+- `device_preferences` 最终至少包含 `device_name`、`hidden`、`sort_order`、`updated_at`。
+- `/api/devices` 的设备项可新增脱敏后的 `capabilities.temperature`，只包含前端所需的 `min/max/step`，不得返回 WiFi command、MIOT `siid/piid`、token、host 或 did。
+- `/api/devices/status` 对支持设备可新增 `target_temperature`；字段缺失时前端必须向后兼容。
+- 设备排序和隐藏写入偏好表；空调协议能力继续来自本地 YAML，不写入 SQLite，不提供普通用户编辑协议参数的入口。
+
+### 10.5 实现文件（预估）
+
+- `app/database.py`：为 `device_preferences` 增加 `sort_order`
+- `app/modules/devices.py`：排序、能力脱敏序列化、温度范围校验与 WiFi/MIOT 调用
+- `app/static/app.js`、`app/static/style.css`：页面内编辑、原生拖动、隐藏区、空调温控
+- `config/devices.yaml.example`：仅增加无真实凭据的空调能力示例
+- README / AGENTS / 本文件：完成后同步实际行为、API、模块地图和状态
+
+### 10.6 验收
+
+1. 管理设备时不打开弹窗或详情页；可在当前设备页隐藏、恢复设备。
+2. 不同类型设备可以自由互换位置；刷新页面、重新登录、重启服务后顺序保持，并对所有用户一致。
+3. 隐藏设备不出现在默认列表和默认状态查询中；恢复后回到隐藏前的全局位置。
+4. 重复名称、未知名称、缺少当前设备的非法排序请求返回中文 `400`，数据库顺序不发生部分更新。
+5. 未声明温控能力的空调仍只有开关，不显示无效温控。
+6. 已声明能力的 WiFi/MIOT 空调可在卡片上按 `step` 调温；越界或步长不合法返回中文 `400`，不下发设备命令。
+7. 单台空调查询/设置失败不影响其他设备；响应与日志无 token、host、did 等敏感信息。
+8. 普通用户与管理员均可排序、隐藏和调温；未登录请求返回 `401`。
+9. `python -m app.modules.devices` 自检覆盖稳定排序、隐藏恢复位置、能力脱敏、温度边界与命令路由；无真实设备时优雅跳过联调。
+
+### 10.7 明确不做
+
+- 不做独立设备详情页、独立设备管理页或管理弹窗。
+- 不保留按类型强制分组；本期采用全局自由排序。
+- 不做每用户独立设备顺序、房间分组、别名或自动场景。
+- 不自动探测或猜测未知空调的 MIOT 属性，不向未声明能力的设备发送温控命令。
+- 不做空调模式、风速、扫风、睡眠模式、定时等完整遥控器；本期只有开关和目标温度。
+- 不允许普通用户编辑 YAML、token、host、did、siid/piid 等系统配置。
 
 ---
 

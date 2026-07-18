@@ -7,28 +7,34 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <h1>🏠 HomeDash</h1>
-    <div class="header-actions">
-      <button id="refresh-btn">🔄</button>
-      <button id="settings-btn" title="设置">☰</button>
-    </div>
-  </header>
-  <nav class="tabs">
-    <button class="tab active" data-tab="ai">AI 工作台</button>
-    <button class="tab" data-tab="items">日用品</button>
-    <button class="tab" data-tab="todos">重点待办</button>
-    <button class="tab" data-tab="uptime">设备&网站监控</button>
-    <button class="tab" data-tab="devices">设备控制</button>
-  </nav>
-  <main>
-    <section id="tab-devices" class="panel"></section>
-    <section id="tab-uptime" class="panel"></section>
-    <section id="tab-items" class="panel"></section>
-    <section id="tab-todos" class="panel"></section>
-    <section id="tab-ai" class="panel active"></section>
-    <section id="tab-setup" class="panel"></section>
-  </main>
+  <div id="auth-view" class="auth-screen"></div>
+  <div id="app-shell" class="hidden">
+    <header>
+      <h1>🏠 HomeDash</h1>
+      <div class="header-actions">
+        <button id="refresh-btn" title="刷新">🔄</button>
+        <div class="account-menu-wrap">
+          <button id="settings-btn" title="账户菜单" aria-expanded="false">•••</button>
+          <div id="account-menu" class="account-menu hidden"></div>
+        </div>
+      </div>
+    </header>
+    <nav class="tabs">
+      <button class="tab active" data-tab="ai">AI 工作台</button>
+      <button class="tab" data-tab="items">日用品</button>
+      <button class="tab" data-tab="todos">重点待办</button>
+      <button class="tab" data-tab="uptime">设备&网站监控</button>
+      <button class="tab" data-tab="devices">设备控制</button>
+    </nav>
+    <main>
+      <section id="tab-devices" class="panel"></section>
+      <section id="tab-uptime" class="panel"></section>
+      <section id="tab-items" class="panel"></section>
+      <section id="tab-todos" class="panel"></section>
+      <section id="tab-ai" class="panel active"></section>
+      <section id="tab-setup" class="panel"></section>
+    </main>
+  </div>
   <div id="toast"></div>
   <div id="modal" class="modal hidden"></div>
   <script src="/app.js"></script>
