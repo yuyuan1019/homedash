@@ -486,6 +486,12 @@ main {
   font-size: 0.8rem;
 }
 .todo-note { white-space: pre-wrap; }
+.todo-image-strip, .todo-image-grid { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.55rem; }
+.todo-image-strip img, .todo-image-thumb { width: 64px; height: 64px; }
+.todo-image-strip img, .todo-image-thumb img { border-radius: 8px; border: 1px solid var(--line); object-fit: cover; }
+.todo-image-thumb { position: relative; }
+.todo-image-thumb img { width: 100%; height: 100%; display: block; }
+.todo-image-remove { position: absolute; top: -7px; right: -7px; width: 21px; height: 21px; border: 0; border-radius: 50%; background: #555; color: #fff; cursor: pointer; font-size: 1.1rem; line-height: 18px; }
 .todo-actions {
   display: flex;
   flex-wrap: wrap;

@@ -927,9 +927,8 @@ function todoPriorityBadge(priority) {
 }
 
 function renderTodoCard(todo) {
-  const reminder = todo.remind_at ? `提醒 ${fmtDate(todo.remind_at)} ${todo.remind_at.slice(11, 16)}` : '';
   const due = todo.due_date ? `截止 ${todo.due_date}` : '未设截止日';
-  const meta = [due, todo.assignee, reminder].filter(Boolean).join(' · ');
+  const meta = due;
   const action = todo.status === 'done'
     ? `<button class="btn btn-small todo-reopen" data-id="${todo.id}">重新打开</button>`
     : `<button class="btn btn-small todo-done" data-id="${todo.id}">完成</button>`;
@@ -939,6 +938,7 @@ function renderTodoCard(todo) {
         <div class="todo-title">${esc(todo.title)} ${todoPriorityBadge(todo.priority)} ${todo.overdue ? '<span class="badge badge-danger">已过期</span>' : ''}</div>
         <div class="todo-meta">${esc(meta)}</div>
         ${todo.note ? `<div class="todo-note">${esc(todo.note)}</div>` : ''}
+        ${todo.images?.length ? `<div class="todo-image-strip">${todo.images.map((image) => `<img src="${todoImageUrl(todo.id, image.id)}" alt="待办图片">`).join('')}</div>` : ''}
       </div>
       <div class="todo-actions">
         ${action}
@@ -988,13 +988,79 @@ async function loadTodos() {
   renderTodos(data || []);
 }
 
-function datetimeLocalValue(value) {
-  return value ? value.slice(0, 16) : '';
+function todoImageUrl(todoId, imageId) { return `/api/todos/${todoId}/images/${encodeURIComponent(imageId)}`; }
+
+function renderTodoImages(todo) {
+  if (!todo?.images?.length) return '';
+  return `<div class="todo-image-grid">${todo.images.map((image) => `
+    <div class="todo-image-thumb">
+      <img src="${todoImageUrl(todo.id, image.id)}" alt="待办图片">
+      <button class="todo-image-remove" type="button" data-image-id="${image.id}" title="移除图片">&times;</button>
+    </div>`).join('')}</div>`;
+}
+
+const pendingImageUrls = new Set();
+
+function isSupportedTodoImage(file) {
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.type);
+}
+
+function revokePendingTodoImageUrls() {
+  for (const url of pendingImageUrls) URL.revokeObjectURL(url);
+  pendingImageUrls.clear();
+}
+
+function currentExistingImageCount() {
+  return document.querySelectorAll('#todo-existing-images .todo-image-thumb').length;
+}
+
+function renderPendingTodoImages() {
+  const input = document.getElementById('todo-images');
+  const container = document.getElementById('todo-pending-images');
+  if (!input || !container) return;
+  revokePendingTodoImageUrls();
+  container.innerHTML = [...input.files].map((file) => {
+    const url = URL.createObjectURL(file);
+    pendingImageUrls.add(url);
+    return `    <div class="todo-image-thumb"><img src="${url}" alt="待上传图片" title="${esc(file.name)}"></div>`;
+  }).join('');
+}
+
+function setTodoImageFiles(files) {
+  const input = document.getElementById('todo-images');
+  const valid = files.filter(isSupportedTodoImage);
+  if (!input || !valid.length) return 0;
+  const capacity = 5 - currentExistingImageCount();
+  if (capacity <= 0) {
+    toast('每个待办最多 5 张图片', 'error');
+    return 0;
+  }
+  const added = valid.slice(0, capacity);
+  const transfer = new DataTransfer();
+  added.forEach((file) => transfer.items.add(file));
+  input.files = transfer.files;
+  renderPendingTodoImages();
+  if (valid.length > added.length) toast('图片数量已达到 5 张上限', 'error');
+  return added.length;
+}
+
+function addTodoImageFiles(files) {
+  const input = document.getElementById('todo-images');
+  const before = input?.files.length || 0;
+  setTodoImageFiles([...(input?.files || []), ...files]);
+  return Math.max(0, (input?.files.length || 0) - before);
+}
+
+function bindTodoImageRemoveButtons(todoId) {
+  document.querySelectorAll('#todo-existing-images .todo-image-remove').forEach((button) => {
+    button.addEventListener('click', () => deleteTodoImage(todoId, button.dataset.imageId));
+  });
 }
 
 function showTodoForm(todo = null) {
   const isEdit = !!todo;
-  const channels = todo?.remind_channels || [];
+  const formState = { id: todo?.id, abort: new AbortController() };
+  revokePendingTodoImageUrls();
   showModal(`
     <div class="modal-content">
       <div class="modal-header">
@@ -1009,20 +1075,7 @@ function showTodoForm(todo = null) {
         </select>
       </div>
       <div class="form-group"><label>截止日期</label><input type="date" id="todo-due-date" value="${todo?.due_date || ''}"></div>
-      <div class="form-group"><label>负责人</label><input id="todo-assignee" value="${todo?.assignee || ''}" placeholder="例如：我、配偶、双方"></div>
-      <div class="form-group"><label>提醒时间</label><input type="datetime-local" id="todo-remind-at" value="${datetimeLocalValue(todo?.remind_at)}"></div>
-      <div class="form-group"><label>提醒频道</label>
-        <div class="todo-channel-options">
-          <label><input type="checkbox" name="todo-channel" value="qq" ${channels.includes('qq') ? 'checked' : ''}> QQ</label>
-          <label><input type="checkbox" name="todo-channel" value="wechat" ${channels.includes('wechat') ? 'checked' : ''}> 微信</label>
-          <label><input type="checkbox" name="todo-channel" value="email" ${channels.includes('email') ? 'checked' : ''}> 仅邮件周报</label>
-        </div>
-      </div>
-      <div class="form-group"><label>重复提醒</label>
-        <select id="todo-remind-repeat">
-          ${[['none', '不重复'], ['once', '一次'], ['daily', '每天'], ['weekly', '每周']].map(([value, label]) => `<option value="${value}" ${(todo?.remind_repeat || 'none') === value ? 'selected' : ''}>${label}</option>`).join('')}
-        </select>
-      </div>
+      <div class="form-group"><label>图片（最多 5 张，每张不超过 10MB，可直接粘贴）</label><div id="todo-existing-images">${renderTodoImages(todo)}</div><div id="todo-pending-images" class="todo-image-grid"></div><input type="file" id="todo-images" accept="image/jpeg,image/png,image/gif,image/webp" multiple></div>
       <div class="form-actions">
         ${isEdit ? '<button class="btn" id="delete-todo-btn" style="color:var(--down);">删除</button>' : ''}
         <button class="btn modal-cancel">取消</button>
@@ -1030,35 +1083,133 @@ function showTodoForm(todo = null) {
       </div>
     </div>`);
   bindModalClose();
-  document.getElementById('save-todo').addEventListener('click', () => saveTodo(todo?.id));
+  // 关闭/取消弹窗时中止进行中的图片上传，避免已取消的文件继续落库。
+  document.querySelectorAll('.close-btn, .modal-cancel').forEach((btn) => btn.addEventListener('click', () => formState.abort.abort()));
+  document.getElementById('save-todo').addEventListener('click', () => saveTodo(formState));
   document.getElementById('delete-todo-btn')?.addEventListener('click', () => deleteTodo(todo.id));
+  bindTodoImageRemoveButtons(formState.id);
+  const imageInput = document.getElementById('todo-images');
+  imageInput.addEventListener('change', () => setTodoImageFiles([...imageInput.files]));
+  imageInput.closest('.modal-content').addEventListener('paste', (event) => {
+    const files = [...(event.clipboardData?.files || [])];
+    const added = addTodoImageFiles(files);
+    if (added) {
+      event.preventDefault();
+      toast(`已粘贴 ${added} 张图片，保存后上传`, 'success');
+    }
+  });
 }
 
 function todoPayload() {
-  const channels = [...document.querySelectorAll('input[name="todo-channel"]:checked')].map((input) => input.value);
   return {
     title: document.getElementById('todo-title').value.trim(),
     note: document.getElementById('todo-note').value.trim() || null,
     priority: document.getElementById('todo-priority').value,
     due_date: document.getElementById('todo-due-date').value || null,
-    assignee: document.getElementById('todo-assignee').value.trim() || null,
-    remind_at: document.getElementById('todo-remind-at').value || null,
-    remind_channels: channels,
-    remind_repeat: document.getElementById('todo-remind-repeat').value,
   };
 }
 
-async function saveTodo(id) {
+async function uploadOneTodoImage(todoId, file, signal) {
+  if (file.size > 10 * 1024 * 1024) return `${file.name} 超过 10MB`;
+  const form = new FormData();
+  form.append('image', file);
+  let response;
+  try {
+    response = await fetch(`/api/todos/${todoId}/images`, { method: 'POST', body: form, signal });
+  } catch (error) {
+    if (error?.name === 'AbortError') return `${file.name} 已取消`;
+    return `${file.name} 网络错误`;
+  }
+  const data = await response.json().catch(() => null);
+  if (!response.ok) return data?.detail || `${file.name} 上传失败`;
+  return null;
+}
+
+async function uploadTodoImages(formState) {
+  const input = document.getElementById('todo-images');
+  if (!input || !input.files.length) return;
+  const failed = [];
+  for (const file of [...input.files]) {
+    // 单张失败（含网络异常/取消）只记录原因并继续，保证下面的重置逻辑一定执行，
+    // 避免中途抛出跳过重置、导致重试时重复上传已成功的图片。
+    const reason = await uploadOneTodoImage(formState.id, file, formState.abort?.signal);
+    if (reason) failed.push({ file, reason });
+  }
+  if (formState.abort?.signal?.aborted) {
+    // 用户已取消（关闭/取消弹窗）：不再重置输入框、不再渲染预览、不抛错，
+    // 让 saveTodo 走正常清理路径（revoke blob、loadTodos），避免在已关弹窗上做无意义
+    // DOM 操作、跨待办污染的刷新 GET，以及「已取消」这类自相矛盾的提示。
+    return;
+  }
+  // 成功的移出输入框，失败的保留供重试，避免重试时重复上传已成功的图片。
+  const transfer = new DataTransfer();
+  failed.forEach((item) => transfer.items.add(item.file));
+  input.files = transfer.files;
+  renderPendingTodoImages();
+  if (failed.length) {
+    const first = failed[0].reason;
+    throw new Error(failed.length === 1 ? first : `${failed.length} 张图片上传失败（${first}）`);
+  }
+}
+
+async function refreshExistingTodoImages(todoId) {
+  // 从服务端重拉并刷新已存在图片区，使缩略图与容量计数与 DB 一致。
+  const { ok, data } = await fetchJSON(API.todo(todoId));
+  if (!ok) return;
+  const container = document.getElementById('todo-existing-images');
+  if (container) {
+    container.innerHTML = renderTodoImages(data);
+    bindTodoImageRemoveButtons(todoId);
+  }
+}
+
+async function saveTodo(formState) {
   const payload = todoPayload();
   if (!payload.title) { toast('标题必填', 'error'); return; }
-  const { ok, data } = await fetchJSON(id ? API.todo(id) : API.todos(), {
-    method: id ? 'PUT' : 'POST',
-    body: JSON.stringify(payload),
-  });
-  if (!ok) { toast(data?.detail || '保存失败', 'error'); return; }
-  toast(id ? '待办已保存' : '待办已添加', 'success');
+  // formState.id 可变：新建成功后写回，使上传失败后的重试走 PUT，避免重复建待办。
+  const wasNew = !formState.id;
+  if (wasNew) {
+    const { ok, data } = await fetchJSON(API.todos(), { method: 'POST', body: JSON.stringify(payload) });
+    if (!ok) { toast(data?.detail || '保存失败', 'error'); return; }
+    formState.id = data.id;
+    // 新建已落库：把按钮切到「保存」态，提示用户待办已存在、可重试上传。
+    const saveBtn = document.getElementById('save-todo');
+    if (saveBtn) saveBtn.textContent = '保存';
+  } else {
+    const { ok } = await fetchJSON(API.todo(formState.id), { method: 'PUT', body: JSON.stringify(payload) });
+    if (!ok) { toast('保存失败', 'error'); return; }
+  }
+  let uploadError = null;
+  try {
+    await uploadTodoImages(formState);
+  } catch (error) {
+    uploadError = error.message;
+  }
+  if (uploadError) {
+    // 待办已落库：明确告知「已创建/已保存」，仅图片失败可重试，
+    // 避免用户误以为整体失败而重填导致重复待办。
+    // 已上传成功的图已落库——从服务端刷新已存在图片区，使容量计数与缩略图准确，
+    // 否则 currentExistingImageCount 仍为 0，用户继续选图会误判容量、最终被后端拒。
+    await refreshExistingTodoImages(formState.id);
+    toast(`${wasNew ? '待办已创建' : '待办已保存'}，但 ${uploadError}（可再次点保存重试）`, 'error');
+    loadTodos();
+    return;
+  }
+  toast(wasNew ? '待办已添加' : '待办已保存', 'success');
+  revokePendingTodoImageUrls();
   closeModal();
   loadTodos();
+}
+
+async function deleteTodoImage(todoId, imageId) {
+  const { ok, data } = await fetchJSON(`/api/todos/${todoId}/images/${encodeURIComponent(imageId)}`, { method: 'DELETE' });
+  if (!ok) { toast(data?.detail || '移除图片失败', 'error'); return; }
+  // 只局部刷新已存在图片区，保留用户正在编辑的标题/备注和已选的待传文件。
+  const container = document.getElementById('todo-existing-images');
+  if (container) {
+    container.innerHTML = renderTodoImages(data);
+    bindTodoImageRemoveButtons(todoId);
+  }
 }
 
 async function showTodoDetail(id) {

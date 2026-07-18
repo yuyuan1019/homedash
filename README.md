@@ -65,8 +65,8 @@
 
 ### 4. 重点待办（已实现）
 
-- 独立「重点待办」Tab：新建、编辑、完成、重开、删除，支持优先级、截止日期、负责人、备注
-- 可登记下次提醒时间、QQ / 微信 / 邮件频道意图及一次/每日/每周重复规则
+- 独立「重点待办」Tab：新建、编辑、完成、重开、删除，支持优先级、截止日期、备注和图片附件（缩略图；可直接粘贴剪贴板图片）
+- 面板表单不展示负责人及提醒时间、频道、重复规则；既有 home agent 提醒接口继续保留，避免影响已接入的自动化
 - `home agent` 轮询 `/api/agent/todos/due`，转发服务端生成的中文 `message` 后调用 `remind-fired`；HomeDash 不实现 QQ/微信协议
 - `AGENT_API_TOKEN` 非空时，agent 路径必须带 `X-HomeDash-Token` 或 `Authorization: Bearer`；未配置仅适用于内网
 
@@ -190,7 +190,7 @@ PY
 | 层 | 选型 | 说明 |
 |----|------|------|
 | 语言 / 运行时 | Python 3.12 | 类型写法 `X \| None` |
-| Web | FastAPI + Uvicorn | 异步 API |
+| Web | FastAPI + Uvicorn + python-multipart | 异步 API；图片附件表单上传 |
 | 数据库 | SQLite + aiosqlite | **无 ORM**，裸 SQL，`CREATE TABLE IF NOT EXISTS` |
 | 米家 WiFi | python-miio | 局域网 `Device.send` |
 | 米家 BLE Mesh | micloud | 云端 MIOT prop set/get |
@@ -203,6 +203,7 @@ PY
 
 ```
 fastapi
+python-multipart
 uvicorn[standard]
 python-miio
 pyyaml
@@ -516,6 +517,8 @@ python -m app.modules.users     # 角色校验与管理员保护
 | GET | `/api/todos/summary` | 未完成、过期与优先事项摘要 |
 | GET / POST | `/api/agent/todos/due`、`/open` | agent 拉取到点或未完成待办 |
 | POST / PUT | `/api/agent/todos/*/remind-fired`、`/remind` | agent 回写提醒或修改提醒 |
+| POST | `/api/todos/{id}/images` | 上传待办图片（JPG/PNG/GIF/WebP，最多 5 张，每张 10MB） |
+| GET / DELETE | `/api/todos/{id}/images/{image_id}` | 读取或移除待办图片 |
 | GET / POST | `/api/notify/config`、`/test`、`/weekly` | SMTP 配置状态、试发、周报 |
 | POST | `/api/ai/parse`、`/apply` | AI 解析预览、确认写入 |
 | GET | `/api/ai/audit` | AI 写库审计记录 |

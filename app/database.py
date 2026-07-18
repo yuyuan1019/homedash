@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS todos (
     remind_channels TEXT,
     remind_repeat TEXT,
     external_ref TEXT,
+    images TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     completed_at TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
@@ -123,6 +124,7 @@ async def init_db() -> None:
     await _db.executescript(SCHEMA)
     await _ensure_columns(_db, "items", {"location": "TEXT", "expires_at": "TEXT"})
     await _ensure_columns(_db, "device_preferences", {"sort_order": "INTEGER"})
+    await _ensure_columns(_db, "todos", {"images": "TEXT"})
     await _ensure_columns(_db, "ai_audit", {
         "stage": "TEXT", "session_id": "TEXT", "llm_model": "TEXT",
         "llm_reply": "TEXT", "confidence": "TEXT", "duration_ms": "INTEGER",
