@@ -115,6 +115,66 @@ BRAVE_SEARCH_TOOL = {
     },
 }
 
+MANAGE_ITEM_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "manage_item",
+        "description": "管理家庭物品库存：购买入库(purchase)、消耗使用(usage)、盘点设库存(set_stock)、新建物品(create)、修改物品信息(update)。用户说加/买/入库/新增物品时必须用此工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["purchase", "usage", "set_stock", "create", "update"]},
+                "name": {"type": "string", "description": "物品名称（必填）"},
+                "amount": {"type": "number", "description": "数量，purchase/usage 必填"},
+                "current_stock": {"type": "number", "description": "盘点后的库存数量，set_stock 必填"},
+                "category": {"type": "string", "description": "分类：纸品/洗护/清洁/厨房/宠物/冷冻/药品/其他"},
+                "unit": {"type": "string", "description": "单位：包/卷/瓶/个/箱等"},
+                "min_stock": {"type": "number", "description": "最低库存预警值"},
+                "location": {"type": "string", "description": "存放位置"},
+                "expires_at": {"type": "string", "description": "过期日期，格式 YYYY-MM"},
+                "create_if_missing": {"type": "boolean", "description": "物品不存在时自动创建，purchase/usage 可用"},
+            },
+            "required": ["action", "name"],
+        },
+    },
+}
+
+MANAGE_TODO_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "manage_todo",
+        "description": "管理家庭待办事项：新建(create)、完成(complete)、重新打开(reopen)、修改(update)、删除(delete)。用户说添加/新建/完成待办时必须用此工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["create", "complete", "reopen", "update", "delete"]},
+                "title": {"type": "string", "description": "待办标题，create 必填"},
+                "todo_id": {"type": "integer", "description": "待办ID，complete/reopen/update/delete 必填"},
+                "priority": {"type": "string", "enum": ["high", "medium", "low"], "description": "优先级，create/update 可选"},
+                "due_date": {"type": "string", "description": "截止日期 YYYY-MM-DD，create/update 可选"},
+                "note": {"type": "string", "description": "备注，create/update 可选"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+QUERY_HOME_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "query_home",
+        "description": "查询家庭数据：查看需要购买的物品(need_buy)、搜索物品(items)、查看未完成待办(open_todos)、查看过期待办(overdue_todos)。用户问有什么要买的/查库存/待办情况时必须用此工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["need_buy", "items", "open_todos", "overdue_todos"]},
+                "name": {"type": "string", "description": "物品名称关键词，仅 action=items 时使用"},
+            },
+            "required": ["action"],
+        },
+    },
+}
+
 
 async def _brave_search(query: str, count: int = 5) -> list[dict]:
     """调用 Brave Search API，返回简化结果列表。"""
@@ -141,6 +201,64 @@ async def _brave_search(query: str, count: int = 5) -> list[dict]:
         {"title": r.get("title", ""), "url": r.get("url", ""), "description": r.get("description", "")}
         for r in results[:count]
     ]
+
+
+async def _execute_tool(db, func_name: str, args: dict) -> str:
+    """执行工具调用，返回 JSON 字符串供 LLM 消费。manage_item/manage_todo 复用 ai_executor。"""
+    if func_name == "brave_web_search":
+        query = args.get("query", "")
+        if not query:
+            return "搜索关键词为空"
+        results = await _brave_search(query)
+        return json.dumps(results, ensure_ascii=False) if results else "未找到相关搜索结果"
+
+    # 过滤 LLM 可能注入的危险字段
+    safe_args = {k: v for k, v in args.items() if k not in ("action", "op")}
+
+    if func_name == "manage_item":
+        action = args.get("action", "")
+        op_map = {"purchase": "item.purchase", "usage": "item.usage", "set_stock": "item.set_stock",
+                   "create": "item.create", "update": "item.update"}
+        op = op_map.get(action)
+        if not op:
+            return f"不支持的操作: {action}"
+        try:
+            validated = _validate([{"op": op, **safe_args}])
+            result = await ai_executor.execute_action(db, validated[0])
+            return json.dumps(result, ensure_ascii=False)
+        except HTTPException as e:
+            return f"操作失败: {e.detail}"
+
+    if func_name == "manage_todo":
+        action = args.get("action", "")
+        op_map = {"create": "todo.create", "complete": "todo.complete", "reopen": "todo.reopen",
+                   "update": "todo.update", "delete": "todo.delete"}
+        op = op_map.get(action)
+        if not op:
+            return f"不支持的操作: {action}"
+        if action == "delete" and not isinstance(args.get("todo_id"), int):
+            return "删除待办必须提供有效的 todo_id"
+        try:
+            validated = _validate([{"op": op, **safe_args}])
+            result = await ai_executor.execute_action(db, validated[0])
+            return json.dumps(result, ensure_ascii=False)
+        except HTTPException as e:
+            return f"操作失败: {e.detail}"
+
+    if func_name == "query_home":
+        action = args.get("action", "")
+        op_map = {"need_buy": "query.need_buy", "items": "query.items",
+                   "open_todos": "query.open_todos", "overdue_todos": "query.overdue_todos"}
+        op = op_map.get(action)
+        if not op:
+            return f"不支持的查询: {action}"
+        q_action = {"op": op}
+        if action == "items" and args.get("name"):
+            q_action["name"] = args["name"]
+        result = await _query(db, q_action)
+        return json.dumps(result, ensure_ascii=False)
+
+    return f"未知工具: {func_name}"
 
 
 def _enabled() -> bool:
@@ -421,15 +539,17 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
         raise HTTPException(400, "请输入内容")
     base_url, api_key, model, timeout_sec = _llm_config()
     brave_available = _brave_api_key() is not None
+    snapshot_json = json.dumps(await _snapshot(db), ensure_ascii=False)
     chat_prompt = (
-        "你是 HomeDash 家庭管理顾问，一个友好、简洁的中文助手。你可以帮助用户：\n"
-        "- 解答关于家庭物品管理、库存预测的问题\n"
-        "- 提供家务和家庭管理的建议\n"
-        "- 解释 HomeDash 面板的功能和使用方法\n"
-        "- 根据下方上下文快照回答用户关于当前库存数量、待办状态等问题\n"
-        + ("- 如需查询实时信息（天气、新闻、百科等），可使用 brave_web_search 工具搜索网络\n" if brave_available else "")
-        + "回复用中文，简洁清晰，不要 Markdown 格式。如果不知道答案，诚实说明。"
-        "上下文：" + json.dumps(await _snapshot(db), ensure_ascii=False)
+        "你是 HomeDash 家庭管理助手，一个友好、简洁的中文助手。你可以：\n"
+        "- 操作库存：购买入库、消耗使用、盘点、新建/修改物品（用 manage_item 工具）\n"
+        "- 管理待办：新建、完成、重开、修改、删除待办（用 manage_todo 工具）\n"
+        "- 查询数据：查看需购清单、搜索物品、查看待办状态（用 query_home 工具）\n"
+        "- 解答家庭物品管理、库存预测、家务收纳等问题\n"
+        + ("- 搜索网络获取实时信息：天气、新闻、百科等（用 brave_web_search 工具）\n" if brave_available else "")
+        + "用户说加/买/入库/用了/消耗/盘点/新建物品/新建待办/完成待办等指令时，请调用对应工具执行。"
+        "纯聊天问题时直接回复，不要调用工具。回复用中文，简洁清晰，不要 Markdown 格式。如果不知道答案，诚实说明。\n"
+        "上下文：" + snapshot_json
     )
     messages = [{"role": "system", "content": chat_prompt}]
     if payload.history and isinstance(payload.history, list):
@@ -440,17 +560,20 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
                 messages.append({"role": role, "content": str(content)})
     messages.append({"role": "user", "content": payload.text})
 
-    tools = [BRAVE_SEARCH_TOOL] if brave_available else None
+    tools = [MANAGE_ITEM_TOOL, MANAGE_TODO_TOOL, QUERY_HOME_TOOL]
+    if brave_available:
+        tools.append(BRAVE_SEARCH_TOOL)
+
     started = time.perf_counter()
     final_reply = ""
     max_turns = 5
+    action_count = 0
+    max_actions = _max_actions()
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             headers = {"Authorization": f"Bearer {api_key}"}
             for _ in range(max_turns):
-                body: dict = {"model": model, "messages": messages}
-                if tools:
-                    body["tools"] = tools
+                body: dict = {"model": model, "messages": messages, "tools": tools}
                 response = await client.post(
                     f"{base_url}/chat/completions",
                     headers=headers,
@@ -462,6 +585,8 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
                 msg = data["choices"][0]["message"]
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
+                    if action_count + len(tool_calls) > max_actions:
+                        raise HTTPException(400, f"单次对话最多执行 {max_actions} 个操作")
                     messages.append({
                         "role": "assistant",
                         "content": msg.get("content"),
@@ -469,23 +594,29 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
                     })
                     for tc in tool_calls:
                         func = tc.get("function", {})
-                        if func.get("name") == "brave_web_search":
-                            args_str = func.get("arguments", "{}")
+                        func_name = func.get("name", "")
+                        args_str = func.get("arguments", "{}")
+                        try:
+                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                        except json.JSONDecodeError:
+                            args = {}
+                        result_text = await _execute_tool(db, func_name, args)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": result_text,
+                        })
+                        # 审计写操作
+                        if func_name in ("manage_item", "manage_todo"):
+                            action_count += 1
                             try:
-                                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                                result_obj = json.loads(result_text) if result_text.startswith("{") else None
                             except json.JSONDecodeError:
-                                args = {}
-                            query = args.get("query", "")
-                            if query:
-                                results = await _brave_search(query)
-                                result_text = json.dumps(results, ensure_ascii=False) if results else "未找到相关搜索结果"
-                            else:
-                                result_text = "搜索关键词为空，请提供有效的搜索词"
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", ""),
-                                "content": result_text,
-                            })
+                                result_obj = None
+                            await _safe_audit(db, raw_text=payload.text, ok=True, stage="chat",
+                                              session_id=payload.session_id, llm_model=model,
+                                              actions=[{"tool": func_name, **args}],
+                                              results=[result_obj] if result_obj else None)
                     continue
 
                 content = msg.get("content", "")
@@ -680,7 +811,7 @@ async def suggested_chips(days: int = 30, count: int = 4, db=Depends(get_db)):
     count = max(2, min(count, 8))
     cur = await db.execute(
         "SELECT raw_text FROM ai_audit "
-        "WHERE stage='parse' AND ok=1 AND raw_text IS NOT NULL AND raw_text != '' "
+        "WHERE (stage='parse' OR stage='chat') AND ok=1 AND raw_text IS NOT NULL AND raw_text != '' "
         "AND created_at >= datetime('now', ?) "
         "ORDER BY id DESC LIMIT 200",
         (f"-{days} days",),

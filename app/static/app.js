@@ -27,10 +27,8 @@ const API = {
   todo: (id) => `/api/todos/${id}`,
   todoDone: (id) => `/api/todos/${id}/done`,
   todoReopen: (id) => `/api/todos/${id}/reopen`,
-  aiParse: '/api/ai/parse',
-  aiApply: '/api/ai/apply',
-  aiRevert: '/api/ai/revert',
   aiAudit: '/api/ai/audit',
+  aiRevert: '/api/ai/revert',
   aiSuggestedChips: '/api/ai/suggested-chips',
   aiChat: '/api/ai/chat',
   aiItemCategory: '/api/ai/item-category',
@@ -77,9 +75,6 @@ let devicesData = [];
 let deviceStatusMap = {}; // name -> status
 let autoRefreshTimer = null;
 let todoStatus = 'open';
-let aiActions = [];
-let aiConfidence = 'low';
-let chatMode = 'action'; // 'action' | 'chat'
 let chatMessages = [];
 let setupStatusData = null;
 let xiaomiLoginStateId = null;
@@ -1263,37 +1258,32 @@ function actionLabel(action) {
   return esc(labels[action.op] || action.op);
 }
 
-function renderAiWorkbench(message = '', results = null, lastActionId = null) {
+function renderAiWorkbench() {
   const container = document.getElementById('tab-ai');
-  const userFriendlyResults = results ? formatResultsForUser(results) : null;
-  const resultText = userFriendlyResults ? `<div class="ai-results-user">${userFriendlyResults}</div>` : '';
 
-  const revertButton = lastActionId ? `
-    <div class="form-actions" style="margin-top: 1rem;">
-      <button class="btn" id="ai-revert" style="color: var(--down);">↶ 撤回上次操作</button>
-    </div>
-  ` : '';
-
-  const actionModeActive = chatMode === 'action' ? 'active' : '';
-  const chatModeActive = chatMode === 'chat' ? 'active' : '';
+  let messagesHtml = '';
+  if (chatMessages.length === 0) {
+    messagesHtml = '<div class="chat-welcome">你好！我是 HomeDash 家庭助手。<br>可以帮你管理库存、待办，也可以聊天和查资料。</div>';
+  } else {
+    messagesHtml = chatMessages.map((msg) => {
+      const label = msg.role === 'user' ? '你' : '助手';
+      const bubbleClass = msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant';
+      return `<div class="chat-message ${msg.role}"><div class="chat-label">${label}</div><div class="chat-bubble ${bubbleClass}">${esc(msg.content)}</div></div>`;
+    }).join('');
+  }
 
   container.innerHTML = `
     <div class="card ai-workbench">
-      <div class="ai-mode-toggle">
-        <button class="ai-mode-btn ${actionModeActive}" id="ai-mode-action">⚡ 快捷操作</button>
-        <button class="ai-mode-btn ${chatModeActive}" id="ai-mode-chat">💬 家庭顾问</button>
+      <div class="ai-chips"></div>
+      <div class="chat-messages" id="ai-messages">${messagesHtml}</div>
+      <div id="ai-loading" class="ai-loading" style="display:none;">
+        <div class="ai-loading-spinner"></div>
+        <div class="ai-loading-text">思考中...</div>
       </div>
-      <div id="ai-action-panel" ${chatMode === 'chat' ? 'style="display:none"' : ''}>
-        <div class="ai-chips"></div>
-        <div class="form-group"><label>用中文描述你想做什么</label><textarea id="ai-text" placeholder="例如：加 10 包方便面，并添加高优先级待办换滤芯">${esc(message)}</textarea></div>
-        <div class="form-actions"><button class="btn btn-primary" id="ai-parse">执行</button></div>
-        <div id="ai-loading" class="ai-loading" style="display: none;">
-          <div class="ai-loading-spinner"></div>
-          <div class="ai-loading-text">思考中...</div>
-        </div>
-        <div id="ai-response"></div>${resultText}${revertButton}
+      <div class="chat-input-row">
+        <textarea id="ai-text" class="chat-textarea" placeholder="输入指令或问题..." rows="1"></textarea>
+        <button class="chat-send-btn" id="ai-send-btn" title="发送">▶</button>
       </div>
-      <div id="ai-chat-panel" ${chatMode === 'action' ? 'style="display:none"' : ''}></div>
       <button class="ai-audit-toggle" id="ai-audit-toggle">📋 查看操作溯源 ▸</button>
       <div id="ai-audit-panel" class="ai-audit-panel">
         <div id="ai-audit-list" class="audit-list"><div class="empty-state">加载中...</div></div>
@@ -1301,21 +1291,23 @@ function renderAiWorkbench(message = '', results = null, lastActionId = null) {
       </div>
     </div>`;
 
-  if (chatMode === 'action') {
-    loadSuggestedChips();
-    document.getElementById('ai-parse').addEventListener('click', parseAi);
-    if (lastActionId) {
-      document.getElementById('ai-revert')?.addEventListener('click', () => revertAi(lastActionId));
-    }
-  }
+  loadSuggestedChips();
 
-  if (chatMode === 'chat') {
-    renderChatView();
-  }
+  const textarea = document.getElementById('ai-text');
+  const sendBtn = document.getElementById('ai-send-btn');
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAiMessage(); }
+  });
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 100) + 'px';
+  });
+  sendBtn.addEventListener('click', sendAiMessage);
 
-  document.getElementById('ai-mode-action').addEventListener('click', () => switchAiMode('action'));
-  document.getElementById('ai-mode-chat').addEventListener('click', () => switchAiMode('chat'));
   document.getElementById('ai-audit-toggle').addEventListener('click', toggleAudit);
+
+  const messagesEl = document.getElementById('ai-messages');
+  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function renderAuditRow(r) {
@@ -1414,116 +1406,19 @@ async function loadSuggestedChips() {
   }));
 }
 
-function formatResultsForUser(results) {
-  if (!Array.isArray(results) || results.length === 0) return '';
-  
-  const lines = [];
-  results.forEach(r => {
-    if (r.op === 'item.purchase') {
-      lines.push(`✓ 已购买 ${r.purchased} ${r.unit || ''} ${r.name || ''}`);
-    } else if (r.op === 'item.usage') {
-      lines.push(`✓ 已消耗 ${r.consumed} ${r.unit || ''} ${r.name || ''}`);
-    } else if (r.op === 'item.create') {
-      lines.push(`✓ 已创建物品 ${r.name || ''}`);
-    } else if (r.op === 'todo.create') {
-      lines.push(`✓ 已创建待办 ${r.title || ''}`);
-    } else if (r.op === 'todo.complete') {
-      lines.push(`✓ 已完成待办 #${r.todo_id || ''}`);
-    } else if (r.op?.startsWith('query.')) {
-      // 查询结果不显示技术细节
-      lines.push(`✓ 查询完成`);
-    }
-  });
-  
-  return lines.join('<br>');
-}
-
-async function parseAi() {
-  const text = document.getElementById('ai-text').value.trim();
-  if (!text) { toast('请输入指令', 'error'); return; }
-  
-  document.getElementById('ai-loading').style.display = 'flex';
-  document.getElementById('ai-parse').disabled = true;
-  const sessionId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
-  
-  try {
-    const { ok, data } = await fetchJSON(API.aiParse, { method: 'POST', body: JSON.stringify({ text, session_id: sessionId }) });
-    if (!ok) { 
-      toast(data?.detail || 'AI 解析失败', 'error');
-      loadAuditList();
-      return; 
-    }
-    
-    aiActions = data.actions || [];
-    aiConfidence = data.confidence || 'low';
-    
-    const writes = aiActions.filter((action) => !action.op.startsWith('query.'));
-    if (writes.length > 0) {
-      const applyResult = await fetchJSON(API.aiApply, { 
-        method: 'POST', 
-        body: JSON.stringify({ 
-          actions: writes, 
-          raw_text: text, 
-          confidence: aiConfidence,
-          session_id: sessionId
-        }) 
-      });
-      
-      if (applyResult.ok) {
-        const actionId = applyResult.data?.action_id || null;
-        renderAiWorkbench('', applyResult.data?.results || data.read_results, actionId);
-        
-        const response = document.getElementById('ai-response');
-        response.textContent = data.reply || '操作已完成。';
-        response.className = 'ai-reply';
-      } else {
-        toast(applyResult.data?.detail || '执行失败', 'error');
-        loadAuditList();
-      }
-    } else {
-      renderAiWorkbench('', data.read_results);
-      const response = document.getElementById('ai-response');
-      response.textContent = data.reply || '查询完成。';
-      response.className = 'ai-reply';
-    }
-  } catch (e) {
-    toast('请求失败', 'error');
-    loadAuditList();
-  } finally {
-    document.getElementById('ai-loading').style.display = 'none';
-    document.getElementById('ai-parse').disabled = false;
-  }
-}
-
 async function revertAi(actionId) {
   if (!actionId) { toast('没有可撤回的操作', 'error'); return; }
-  
+
   const { ok, data } = await fetchJSON(`${API.aiRevert}/${actionId}`, { method: 'POST' });
   if (!ok) {
     toast(data?.detail || '撤回失败', 'error');
     return;
   }
-  
+
   toast('已撤回操作', 'success');
-  renderAiWorkbench('', null, null);
+  renderAiWorkbench();
 }
 
-function switchAiMode(mode) {
-  chatMode = mode;
-  const actionPanel = document.getElementById('ai-action-panel');
-  const chatPanel = document.getElementById('ai-chat-panel');
-  if (mode === 'chat') {
-    actionPanel.style.display = 'none';
-    chatPanel.style.display = '';
-    renderChatView();
-  } else {
-    chatPanel.style.display = 'none';
-    actionPanel.style.display = '';
-    renderAiWorkbench();
-  }
-  document.querySelectorAll('.ai-mode-btn').forEach((btn) => btn.classList.toggle('active', false));
-  document.getElementById(`ai-mode-${mode}`).classList.add('active');
-}
 
 function toggleAudit() {
   const panel = document.getElementById('ai-audit-panel');
@@ -1537,55 +1432,9 @@ function toggleAudit() {
   }
 }
 
-function renderChatView() {
-  const panel = document.getElementById('ai-chat-panel');
-  if (!panel) return;
 
-  let messagesHtml = '';
-  if (chatMessages.length === 0) {
-    messagesHtml = '<div class="chat-welcome">💬 你好！我是 HomeDash 家庭顾问。<br>可以帮你解答库存状态、待办事项、面板使用等问题。</div>';
-  } else {
-    messagesHtml = chatMessages.map((msg) => {
-      const role = msg.role === 'user' ? 'user' : 'assistant';
-      const label = role === 'user' ? '你' : '助手';
-      const bubbleClass = role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant';
-      return `<div class="chat-message ${role}">
-        <div class="chat-label">${label}</div>
-        <div class="chat-bubble ${bubbleClass}">${esc(msg.content)}</div>
-      </div>`;
-    }).join('');
-  }
-
-  panel.innerHTML = `
-    <div class="chat-messages" id="chat-messages">${messagesHtml}</div>
-    <div id="chat-loading" class="ai-loading" style="display:none;">
-      <div class="ai-loading-spinner"></div>
-      <div class="ai-loading-text">思考中...</div>
-    </div>
-    <div class="chat-input-row">
-      <textarea id="chat-input" placeholder="咨询库存、待办或面板使用..." rows="1"></textarea>
-      <button class="chat-send-btn" id="chat-send">▶</button>
-    </div>`;
-
-  const messagesEl = document.getElementById('chat-messages');
-  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
-
-  const input = document.getElementById('chat-input');
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendChatMessage();
-    }
-  });
-  input.addEventListener('input', () => {
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 100) + 'px';
-  });
-  document.getElementById('chat-send').addEventListener('click', sendChatMessage);
-}
-
-async function sendChatMessage() {
-  const input = document.getElementById('chat-input');
+async function sendAiMessage() {
+  const input = document.getElementById('ai-text');
   if (!input) return;
   const text = input.value.trim();
   if (!text) return;
@@ -1593,15 +1442,15 @@ async function sendChatMessage() {
   input.value = '';
   input.style.height = 'auto';
   chatMessages.push({ role: 'user', content: text });
-  renderChatView();
+  renderAiWorkbench();
 
-  const loading = document.getElementById('chat-loading');
-  const sendBtn = document.getElementById('chat-send');
+  const loading = document.getElementById('ai-loading');
+  const sendBtn = document.getElementById('ai-send-btn');
   if (loading) loading.style.display = 'flex';
   if (sendBtn) sendBtn.disabled = true;
 
   try {
-    const history = chatMessages.slice(0, -1).map((msg) => ({ role: msg.role, content: msg.content }));
+    const history = chatMessages.slice(-21, -1).map((msg) => ({ role: msg.role, content: msg.content }));
     const { ok, data } = await fetchJSON(API.aiChat, {
       method: 'POST',
       body: JSON.stringify({ text, session_id: null, history }),
@@ -1617,7 +1466,7 @@ async function sendChatMessage() {
 
   if (loading) loading.style.display = 'none';
   if (sendBtn) sendBtn.disabled = false;
-  renderChatView();
+  renderAiWorkbench();
 }
 
 // ============ 全局刷新 ============
