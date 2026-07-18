@@ -31,6 +31,7 @@ const API = {
   aiApply: '/api/ai/apply',
   aiRevert: '/api/ai/revert',
   aiAudit: '/api/ai/audit',
+  aiSuggestedChips: '/api/ai/suggested-chips',
   aiChat: '/api/ai/chat',
   aiItemCategory: '/api/ai/item-category',
   setupStatus: '/api/setup/status',
@@ -1283,7 +1284,7 @@ function renderAiWorkbench(message = '', results = null, lastActionId = null) {
         <button class="ai-mode-btn ${chatModeActive}" id="ai-mode-chat">💬 家庭顾问</button>
       </div>
       <div id="ai-action-panel" ${chatMode === 'chat' ? 'style="display:none"' : ''}>
-        <div class="ai-chips"><button class="btn btn-small ai-chip">加 10 包方便面</button><button class="btn btn-small ai-chip">用掉 2 卷卫生纸</button><button class="btn btn-small ai-chip">新建待办换滤芯</button><button class="btn btn-small ai-chip">现在有什么要买的</button></div>
+        <div class="ai-chips"></div>
         <div class="form-group"><label>用中文描述你想做什么</label><textarea id="ai-text" placeholder="例如：加 10 包方便面，并添加高优先级待办换滤芯">${esc(message)}</textarea></div>
         <div class="form-actions"><button class="btn btn-primary" id="ai-parse">执行</button></div>
         <div id="ai-loading" class="ai-loading" style="display: none;">
@@ -1296,13 +1297,12 @@ function renderAiWorkbench(message = '', results = null, lastActionId = null) {
       <button class="ai-audit-toggle" id="ai-audit-toggle">📋 查看操作溯源 ▸</button>
       <div id="ai-audit-panel" class="ai-audit-panel">
         <div id="ai-audit-list" class="audit-list"><div class="empty-state">加载中...</div></div>
+        <div id="audit-footer"></div>
       </div>
     </div>`;
 
   if (chatMode === 'action') {
-    document.querySelectorAll('.ai-chip').forEach((button) => button.addEventListener('click', () => {
-      document.getElementById('ai-text').value = button.textContent;
-    }));
+    loadSuggestedChips();
     document.getElementById('ai-parse').addEventListener('click', parseAi);
     if (lastActionId) {
       document.getElementById('ai-revert')?.addEventListener('click', () => revertAi(lastActionId));
@@ -1361,18 +1361,57 @@ function renderAuditRow(r) {
     </div>`;
 }
 
-async function loadAuditList() {
+let auditOffset = 0;
+let auditHasMore = true;
+
+async function loadAuditList(append = false) {
   const el = document.getElementById('ai-audit-list');
   if (!el) return;
-  const { ok, data } = await fetchJSON(API.aiAudit);
-  if (!ok || !Array.isArray(data) || !data.length) {
-    el.innerHTML = '<div class="empty-state">暂无溯源记录</div>';
+  if (!append) { auditOffset = 0; auditHasMore = true; }
+
+  const pageSize = 20;
+  const { ok, data } = await fetchJSON(`${API.aiAudit}?limit=${pageSize}&offset=${auditOffset}`);
+  if (!ok || !data?.rows) {
+    if (!append) el.innerHTML = '<div class="empty-state">暂无溯源记录</div>';
     return;
   }
-  el.innerHTML = data.map(renderAuditRow).join('');
+
+  auditOffset += data.rows.length;
+  auditHasMore = data.has_more;
+
+  const html = data.rows.map(renderAuditRow).join('');
+  if (append) {
+    el.insertAdjacentHTML('beforeend', html);
+  } else {
+    el.innerHTML = html;
+  }
+
+  const footer = document.getElementById('audit-footer');
+  if (footer) {
+    footer.innerHTML = auditHasMore
+      ? '<button class="btn btn-small" id="audit-load-more">加载更多...</button>'
+      : (data.total > 0 ? '<div class="empty-state">已加载全部 ' + data.total + ' 条记录</div>' : '');
+    const btn = document.getElementById('audit-load-more');
+    if (btn) btn.addEventListener('click', () => loadAuditList(true));
+  }
+
   el.querySelectorAll('button[data-revert]').forEach((btn) => {
     btn.addEventListener('click', () => revertAi(Number(btn.dataset.revert)));
   });
+}
+
+async function loadSuggestedChips() {
+  const { ok, data } = await fetchJSON(`${API.aiSuggestedChips}?days=30&count=4`);
+  const chips = (ok && data?.chips) ? data.chips
+    : ['加 10 包方便面', '用掉 2 卷卫生纸', '新建待办换滤芯', '现在有什么要买的'];
+  const container = document.querySelector('.ai-chips');
+  if (!container) return;
+  container.innerHTML = chips.map((text) =>
+    `<button class="btn btn-small ai-chip">${esc(text)}</button>`
+  ).join('');
+  container.querySelectorAll('.ai-chip').forEach((button) => button.addEventListener('click', () => {
+    document.getElementById('ai-text').value = button.textContent;
+  }));
 }
 
 function formatResultsForUser(results) {
@@ -1480,6 +1519,7 @@ function switchAiMode(mode) {
   } else {
     chatPanel.style.display = 'none';
     actionPanel.style.display = '';
+    renderAiWorkbench();
   }
   document.querySelectorAll('.ai-mode-btn').forEach((btn) => btn.classList.toggle('active', false));
   document.getElementById(`ai-mode-${mode}`).classList.add('active');

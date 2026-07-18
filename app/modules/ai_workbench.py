@@ -660,9 +660,53 @@ async def _revert_action(db, action: dict, result: dict) -> None:
 
 
 @router.get("/ai/audit")
-async def audit(limit: int = 50, db=Depends(get_db)):
-    cur = await db.execute("SELECT * FROM ai_audit ORDER BY id DESC LIMIT ?", (max(1, min(limit, 100)),))
-    return [dict(row) for row in await cur.fetchall()]
+async def audit(limit: int = 20, offset: int = 0, db=Depends(get_db)):
+    count_cur = await db.execute("SELECT COUNT(*) FROM ai_audit")
+    total = (await count_cur.fetchone())[0]
+    cur = await db.execute(
+        "SELECT * FROM ai_audit ORDER BY id DESC LIMIT ? OFFSET ?",
+        (max(1, min(limit, 100)), max(0, offset)),
+    )
+    rows = [dict(row) for row in await cur.fetchall()]
+    return {"rows": rows, "total": total, "has_more": offset + len(rows) < total}
+
+
+@router.get("/ai/suggested-chips")
+async def suggested_chips(days: int = 30, count: int = 4, db=Depends(get_db)):
+    """分析近 N 天常用操作文本，返回推荐快捷按钮文案。"""
+    if not _enabled():
+        raise HTTPException(503, "AI 工作台未开启")
+    days = max(1, min(days, 90))
+    count = max(2, min(count, 8))
+    cur = await db.execute(
+        "SELECT raw_text FROM ai_audit "
+        "WHERE stage='parse' AND ok=1 AND raw_text IS NOT NULL AND raw_text != '' "
+        "AND created_at >= datetime('now', ?) "
+        "ORDER BY id DESC LIMIT 200",
+        (f"-{days} days",),
+    )
+    rows = await cur.fetchall()
+    defaults = ["加 10 包方便面", "用掉 2 卷卫生纸", "新建待办换滤芯", "现在有什么要买的"]
+    if not rows:
+        return {"chips": defaults[:count]}
+
+    text_counts: dict[str, int] = {}
+    for row in rows:
+        text = (row["raw_text"] or "").strip()
+        if text:
+            key = text[:30]
+            text_counts[key] = text_counts.get(key, 0) + 1
+
+    sorted_texts = sorted(text_counts.items(), key=lambda x: -x[1])
+    chips = [text for text, _ in sorted_texts[:count]]
+
+    while len(chips) < 2:
+        for d in defaults:
+            if d not in chips:
+                chips.append(d)
+                break
+
+    return {"chips": chips[:count]}
 
 
 if __name__ == "__main__":
