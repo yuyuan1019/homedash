@@ -30,6 +30,12 @@ class ApplyIn(BaseModel):
     confidence: str = "low"
 
 
+class ChatIn(BaseModel):
+    text: str
+    session_id: str | None = None
+    history: list[dict] | None = None
+
+
 class CategoryIn(BaseModel):
     name: str
 
@@ -337,6 +343,66 @@ async def parse(payload: ParseIn, db=Depends(get_db)):
     return {"ok": True, "reply": data.get("reply", "已生成操作预览。"), "confidence": confidence, "actions": actions, "read_results": read_results or None, "needs_disambiguation": None}
 
 
+@router.post("/ai/chat")
+async def chat(payload: ChatIn, db=Depends(get_db)):
+    if not _enabled():
+        raise HTTPException(503, "AI 工作台未开启")
+    if not payload.text.strip():
+        raise HTTPException(400, "请输入内容")
+    base_url, api_key, model, timeout_sec = _llm_config()
+    chat_prompt = (
+        "你是 HomeDash 家庭管理顾问，一个友好、简洁的中文助手。你可以帮助用户：\n"
+        "- 解答关于家庭物品管理、库存预测的问题\n"
+        "- 提供家务和家庭管理的建议\n"
+        "- 解释 HomeDash 面板的功能和使用方法\n"
+        "- 根据下方上下文快照回答用户关于当前库存数量、待办状态等问题\n"
+        "回复用中文，简洁清晰，不要 Markdown 格式。如果不知道答案，诚实说明。"
+        "上下文：" + json.dumps(await _snapshot(db), ensure_ascii=False)
+    )
+    messages = [{"role": "system", "content": chat_prompt}]
+    if payload.history and isinstance(payload.history, list):
+        for msg in payload.history[-20:]:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": str(content)})
+    messages.append({"role": "user", "content": payload.text})
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            headers = {"Authorization": f"Bearer {api_key}"}
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json={"model": model, "messages": messages},
+            )
+        if response.status_code >= 400:
+            raise HTTPException(502, _llm_error_message(response.status_code))
+        data = _response_json(response)
+        reply = data["choices"][0]["message"]["content"]
+        if not isinstance(reply, str):
+            reply = str(reply)
+        reply = reply.strip()
+        if not reply:
+            raise HTTPException(502, "模型未返回有效回复")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        err = str(exc) or exc.__class__.__name__
+        await _safe_audit(db, raw_text=payload.text, ok=False, stage="chat",
+                          session_id=payload.session_id, llm_model=model,
+                          duration_ms=duration_ms, error=err)
+        if isinstance(exc, ValueError):
+            raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(502, "模型调用失败，请检查 LLM 配置或稍后重试") from exc
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    await _safe_audit(db, raw_text=payload.text, ok=True, stage="chat",
+                      session_id=payload.session_id, llm_model=model,
+                      llm_reply=reply, duration_ms=duration_ms)
+    return {"ok": True, "reply": reply, "session_id": payload.session_id}
+
+
 @router.post("/ai/item-category")
 async def item_category(payload: CategoryIn):
     if not _enabled():
@@ -514,4 +580,7 @@ if __name__ == "__main__":
     # set_stock 带 name 正常通过
     b = _validate([{"op": "item.set_stock", "name": "纸巾", "current_stock": 3}])[0]
     assert b["current_stock"] == 3.0 and b["name"] == "纸巾", b
-    print("ai_workbench.py 自检通过：白名单、字段归一与缺标识校验正确。")
+    # ChatIn model
+    c = ChatIn(text="你好", session_id="s1", history=[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}])
+    assert c.text == "你好" and len(c.history) == 2
+    print("ai_workbench.py 自检通过：白名单、字段归一、缺标识校验与 ChatIn 模型正确。")

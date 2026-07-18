@@ -31,6 +31,7 @@ const API = {
   aiApply: '/api/ai/apply',
   aiRevert: '/api/ai/revert',
   aiAudit: '/api/ai/audit',
+  aiChat: '/api/ai/chat',
   aiItemCategory: '/api/ai/item-category',
   setupStatus: '/api/setup/status',
   setupDevices: '/api/setup/devices',
@@ -74,6 +75,8 @@ let autoRefreshTimer = null;
 let todoStatus = 'open';
 let aiActions = [];
 let aiConfidence = 'low';
+let chatMode = 'action'; // 'action' | 'chat'
+let chatMessages = [];
 let setupStatusData = null;
 let xiaomiLoginStateId = null;
 let itemCategoryTimer = null;
@@ -1258,43 +1261,62 @@ function actionLabel(action) {
 
 function renderAiWorkbench(message = '', results = null, lastActionId = null) {
   const container = document.getElementById('tab-ai');
-  
-  // 隐藏技术性描述，只显示用户友好的结果
   const userFriendlyResults = results ? formatResultsForUser(results) : null;
   const resultText = userFriendlyResults ? `<div class="ai-results-user">${userFriendlyResults}</div>` : '';
-  
-  // 撤回按钮
+
   const revertButton = lastActionId ? `
     <div class="form-actions" style="margin-top: 1rem;">
       <button class="btn" id="ai-revert" style="color: var(--down);">↶ 撤回上次操作</button>
     </div>
   ` : '';
-  
+
+  const actionModeActive = chatMode === 'action' ? 'active' : '';
+  const chatModeActive = chatMode === 'chat' ? 'active' : '';
+
   container.innerHTML = `
     <div class="card ai-workbench">
-      <div class="ai-chips"><button class="btn btn-small ai-chip">加 10 包方便面</button><button class="btn btn-small ai-chip">用掉 2 卷卫生纸</button><button class="btn btn-small ai-chip">新建待办换滤芯</button><button class="btn btn-small ai-chip">现在有什么要买的</button></div>
-      <div class="form-group"><label>用中文描述你想做什么</label><textarea id="ai-text" placeholder="例如：加 10 包方便面，并添加高优先级待办换滤芯">${esc(message)}</textarea></div>
-      <div class="form-actions"><button class="btn btn-primary" id="ai-parse">执行</button></div>
-      <div id="ai-loading" class="ai-loading" style="display: none;">
-        <div class="ai-loading-spinner"></div>
-        <div class="ai-loading-text">思考中...</div>
+      <div class="ai-mode-toggle">
+        <button class="ai-mode-btn ${actionModeActive}" id="ai-mode-action">⚡ 快捷操作</button>
+        <button class="ai-mode-btn ${chatModeActive}" id="ai-mode-chat">💬 家庭顾问</button>
       </div>
-      <div id="ai-response"></div>${resultText}${revertButton}
-      <div class="section-title" style="margin-top:1.5rem;">操作溯源</div>
-      <div id="ai-audit-list" class="audit-list"><div class="empty-state">加载中...</div></div>
+      <div id="ai-action-panel" ${chatMode === 'chat' ? 'style="display:none"' : ''}>
+        <div class="ai-chips"><button class="btn btn-small ai-chip">加 10 包方便面</button><button class="btn btn-small ai-chip">用掉 2 卷卫生纸</button><button class="btn btn-small ai-chip">新建待办换滤芯</button><button class="btn btn-small ai-chip">现在有什么要买的</button></div>
+        <div class="form-group"><label>用中文描述你想做什么</label><textarea id="ai-text" placeholder="例如：加 10 包方便面，并添加高优先级待办换滤芯">${esc(message)}</textarea></div>
+        <div class="form-actions"><button class="btn btn-primary" id="ai-parse">执行</button></div>
+        <div id="ai-loading" class="ai-loading" style="display: none;">
+          <div class="ai-loading-spinner"></div>
+          <div class="ai-loading-text">思考中...</div>
+        </div>
+        <div id="ai-response"></div>${resultText}${revertButton}
+      </div>
+      <div id="ai-chat-panel" ${chatMode === 'action' ? 'style="display:none"' : ''}></div>
+      <button class="ai-audit-toggle" id="ai-audit-toggle">📋 查看操作溯源 ▸</button>
+      <div id="ai-audit-panel" class="ai-audit-panel">
+        <div id="ai-audit-list" class="audit-list"><div class="empty-state">加载中...</div></div>
+      </div>
     </div>`;
-  document.querySelectorAll('.ai-chip').forEach((button) => button.addEventListener('click', () => {
-    document.getElementById('ai-text').value = button.textContent;
-  }));
-  document.getElementById('ai-parse').addEventListener('click', parseAi);
-  if (lastActionId) {
-    document.getElementById('ai-revert').addEventListener('click', () => revertAi(lastActionId));
+
+  if (chatMode === 'action') {
+    document.querySelectorAll('.ai-chip').forEach((button) => button.addEventListener('click', () => {
+      document.getElementById('ai-text').value = button.textContent;
+    }));
+    document.getElementById('ai-parse').addEventListener('click', parseAi);
+    if (lastActionId) {
+      document.getElementById('ai-revert')?.addEventListener('click', () => revertAi(lastActionId));
+    }
   }
-  loadAuditList();
+
+  if (chatMode === 'chat') {
+    renderChatView();
+  }
+
+  document.getElementById('ai-mode-action').addEventListener('click', () => switchAiMode('action'));
+  document.getElementById('ai-mode-chat').addEventListener('click', () => switchAiMode('chat'));
+  document.getElementById('ai-audit-toggle').addEventListener('click', toggleAudit);
 }
 
 function renderAuditRow(r) {
-  const stageLabel = r.stage === 'parse' ? '解析' : '执行';
+  const stageLabel = r.stage === 'parse' ? '解析' : r.stage === 'chat' ? '对话' : '执行';
   const okBadge = r.ok
     ? '<span class="badge">成功</span>'
     : '<span class="badge" style="background:var(--down);color:#fff">失败</span>';
@@ -1320,12 +1342,12 @@ function renderAuditRow(r) {
     });
     beforeAfter = parts.join('<br>');
   } catch { /* ignore */ }
-  const revertBtn = (r.stage !== 'parse' && r.ok && !r.reverted)
+  const revertBtn = (r.stage === 'apply' && r.ok && !r.reverted)
     ? `<button class="btn btn-small" data-revert="${r.id}">撤回</button>` : '';
   return `
     <div class="audit-row" style="border-bottom:1px solid var(--border);padding:0.6rem 0;">
       <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
-        <strong>#${r.id}</strong> ${okBadge} <span class="badge badge-outline">${stageLabel}</span> ${revertedTag}
+        ${okBadge} <span class="badge badge-outline">${stageLabel}</span> ${revertedTag}
         <span style="color:var(--muted);font-size:0.8rem;margin-left:auto">${esc(r.created_at || '')} ${model} ${dur}</span>
         ${revertBtn}
       </div>
@@ -1442,6 +1464,117 @@ async function revertAi(actionId) {
   
   toast('已撤回操作', 'success');
   renderAiWorkbench('', null, null);
+}
+
+function switchAiMode(mode) {
+  chatMode = mode;
+  const actionPanel = document.getElementById('ai-action-panel');
+  const chatPanel = document.getElementById('ai-chat-panel');
+  if (mode === 'chat') {
+    actionPanel.style.display = 'none';
+    chatPanel.style.display = '';
+    renderChatView();
+  } else {
+    chatPanel.style.display = 'none';
+    actionPanel.style.display = '';
+  }
+  document.querySelectorAll('.ai-mode-btn').forEach((btn) => btn.classList.toggle('active', false));
+  document.getElementById(`ai-mode-${mode}`).classList.add('active');
+}
+
+function toggleAudit() {
+  const panel = document.getElementById('ai-audit-panel');
+  const btn = document.getElementById('ai-audit-toggle');
+  const expanded = panel.classList.toggle('expanded');
+  if (expanded) {
+    loadAuditList();
+    btn.textContent = '📋 收起操作溯源 ▾';
+  } else {
+    btn.textContent = '📋 查看操作溯源 ▸';
+  }
+}
+
+function renderChatView() {
+  const panel = document.getElementById('ai-chat-panel');
+  if (!panel) return;
+
+  let messagesHtml = '';
+  if (chatMessages.length === 0) {
+    messagesHtml = '<div class="chat-welcome">💬 你好！我是 HomeDash 家庭顾问。<br>可以帮你解答库存状态、待办事项、面板使用等问题。</div>';
+  } else {
+    messagesHtml = chatMessages.map((msg) => {
+      const role = msg.role === 'user' ? 'user' : 'assistant';
+      const label = role === 'user' ? '你' : '助手';
+      const bubbleClass = role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant';
+      return `<div class="chat-message ${role}">
+        <div class="chat-label">${label}</div>
+        <div class="chat-bubble ${bubbleClass}">${esc(msg.content)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  panel.innerHTML = `
+    <div class="chat-messages" id="chat-messages">${messagesHtml}</div>
+    <div id="chat-loading" class="ai-loading" style="display:none;">
+      <div class="ai-loading-spinner"></div>
+      <div class="ai-loading-text">思考中...</div>
+    </div>
+    <div class="chat-input-row">
+      <textarea id="chat-input" placeholder="咨询库存、待办或面板使用..." rows="1"></textarea>
+      <button class="chat-send-btn" id="chat-send">▶</button>
+    </div>`;
+
+  const messagesEl = document.getElementById('chat-messages');
+  if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  const input = document.getElementById('chat-input');
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 100) + 'px';
+  });
+  document.getElementById('chat-send').addEventListener('click', sendChatMessage);
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  chatMessages.push({ role: 'user', content: text });
+  renderChatView();
+
+  const loading = document.getElementById('chat-loading');
+  const sendBtn = document.getElementById('chat-send');
+  if (loading) loading.style.display = 'flex';
+  if (sendBtn) sendBtn.disabled = true;
+
+  try {
+    const history = chatMessages.slice(0, -1).map((msg) => ({ role: msg.role, content: msg.content }));
+    const { ok, data } = await fetchJSON(API.aiChat, {
+      method: 'POST',
+      body: JSON.stringify({ text, session_id: null, history }),
+    });
+    if (ok && data?.reply) {
+      chatMessages.push({ role: 'assistant', content: data.reply });
+    } else {
+      chatMessages.push({ role: 'assistant', content: data?.detail || '抱歉，请求失败，请稍后重试。' });
+    }
+  } catch (e) {
+    chatMessages.push({ role: 'assistant', content: '网络请求失败，请检查连接后重试。' });
+  }
+
+  if (loading) loading.style.display = 'none';
+  if (sendBtn) sendBtn.disabled = false;
+  renderChatView();
 }
 
 // ============ 全局刷新 ============
