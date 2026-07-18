@@ -129,6 +129,58 @@ X-HomeDash-Token: <AGENT_API_TOKEN>
 - 不能删除、禁用或降级当前管理员，系统始终至少保留一个启用的管理员
 - 除登录/初始化接口与 `/api/agent/todos/*` 外，面板业务 API 均要求有效登录会话；agent 接口继续使用 `AGENT_API_TOKEN`
 
+#### 运维备忘：命令行重置某个用户密码
+
+管理员在浏览器 UI 里能直接重置任意用户密码。**只有管理员自己忘记密码把自己锁在外面时**，才需要用下面的命令直接改数据库。散列算法与登录流程完全一致（`hashlib.scrypt` + 每用户随机 salt），并会顺手废止该用户所有旧会话——与 UI 里点「重置密码」一致。
+
+在仓库根目录执行（`docker compose exec` 走容器；`data/homedash.db` 是宿主挂载的持久卷）：
+
+```bash
+# 将 USER 换成要重置的用户名，PASS 换成新密码（8–128 位）
+USER='要重置的用户名' PASS='新密码_2026' && cd ~/MyProjects/homedash && \
+docker compose exec -T -e USER="$USER" -e PASS="$PASS" homedash python - <<'PY'
+import os, base64, hashlib, secrets, sqlite3, sys
+u = os.environ["USER"]; p = os.environ["PASS"]
+if not (8 <= len(p) <= 128):
+    sys.exit("密码长度必须为 8 到 128 个字符")
+salt = secrets.token_bytes(16)
+digest = hashlib.scrypt(p.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
+ph = base64.b64encode(digest).decode("ascii")
+ps = base64.b64encode(salt).decode("ascii")
+c = sqlite3.connect("data/homedash.db")
+row = c.execute("SELECT id FROM users WHERE username=?", (u,)).fetchone()
+if not row:
+    sys.exit(f"用户不存在: {u}")
+uid = row[0]
+c.execute(
+    "UPDATE users SET password_hash=?, password_salt=?, updated_at=datetime('now') WHERE id=?",
+    (ph, ps, uid),
+)
+n = c.execute("DELETE FROM auth_sessions WHERE user_id=?", (uid,)).rowcount
+c.commit(); c.close()
+print(f"✅ 已重置 {u} 的密码，并废止 {n} 个旧会话")
+PY
+```
+
+要点：
+
+- 通过环境变量传密码而非命令行参数，避免明文进程列表；前面加一个空格再回车（`HISTCONTROL=ignorespace` 时）可跳过 shell history
+- `-T` 关闭伪终端，密码不会回显、也不会残留在容器 tty
+- 只改自己数据库，**不重启服务**；用户下一次请求即用新密码
+- 需要看看当前有哪些账号：
+
+  ```bash
+  docker compose exec -T homedash python - <<'PY'
+  import sqlite3
+  for r in sqlite3.connect("data/homedash.db").execute(
+      "SELECT id, username, role, enabled, last_login_at FROM users"
+  ):
+      print(r)
+  PY
+  ```
+
+如果数据库被清空（`data/` 全删），面板会自动回到「创建首个管理员」页，不需要走这条命令。
+
 ---
 
 ## 技术栈
