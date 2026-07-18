@@ -803,8 +803,8 @@ async def audit(limit: int = 20, offset: int = 0, db=Depends(get_db)):
 
 
 @router.get("/ai/suggested-chips")
-async def suggested_chips(days: int = 30, count: int = 4, db=Depends(get_db)):
-    """分析近 N 天常用操作文本，返回推荐快捷按钮文案。"""
+async def suggested_chips(days: int = 30, count: int = 5, db=Depends(get_db)):
+    """分析近 N 天常用操作文本，返回推荐快捷按钮文案。最后一条固定为"最近需要买什么"。"""
     if not _enabled():
         raise HTTPException(503, "AI 工作台未开启")
     days = max(1, min(days, 90))
@@ -817,7 +817,7 @@ async def suggested_chips(days: int = 30, count: int = 4, db=Depends(get_db)):
         (f"-{days} days",),
     )
     rows = await cur.fetchall()
-    defaults = ["加 10 包方便面", "用掉 2 卷卫生纸", "新建待办换滤芯", "现在有什么要买的"]
+    defaults = ["加5包方便面", "加6瓶喜力啤酒", "消耗一包方便面", "加30颗鸡蛋", "用掉2卷卫生纸"]
     if not rows:
         return {"chips": defaults[:count]}
 
@@ -831,11 +831,18 @@ async def suggested_chips(days: int = 30, count: int = 4, db=Depends(get_db)):
     sorted_texts = sorted(text_counts.items(), key=lambda x: -x[1])
     chips = [text for text, _ in sorted_texts[:count]]
 
-    while len(chips) < 2:
+    # 如果用户历史操作涉及库存增减，优先保留这些词条
+    inventory_keywords = ["加", "买", "购", "入", "消耗", "用", "减"]
+    inventory_chips = [chip for chip in chips if any(kw in chip for kw in inventory_keywords)]
+
+    # 补充默认库存相关词条，确保至少有库存操作示例
+    while len(chips) < count:
         for d in defaults:
             if d not in chips:
                 chips.append(d)
                 break
+        if len(chips) >= count:
+            break
 
     return {"chips": chips[:count]}
 

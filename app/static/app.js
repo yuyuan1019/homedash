@@ -125,6 +125,50 @@ function esc(value) {
   }[c]));
 }
 
+// 简单的 Markdown 渲染函数
+function renderMarkdown(text) {
+  if (!text) return '';
+
+  // 转义 HTML 特殊字符
+  let html = esc(text);
+
+  // 代码块 ```language\ncode\n```
+  html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
+    return `<pre><code class="language-${lang || 'text'}">${code.trim()}</code></pre>`;
+  });
+
+  // 行内代码 `code`
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // 粗体 **text** 或 __text__
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+
+  // 斜体 *text* 或 _text_
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
+
+  // 标题 ## Heading
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // 无序列表 - item 或 * item
+  html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+
+  // 有序列表 1. item
+  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+
+  // 链接 [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // 换行
+  html = html.replace(/\n/g, '<br>');
+
+  return html;
+}
+
 function fmtDate(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -934,13 +978,20 @@ function renderTodoCard(todo) {
   const action = todo.status === 'done'
     ? `<button class="btn btn-small todo-reopen" data-id="${todo.id}">重新打开</button>`
     : `<button class="btn btn-small todo-done" data-id="${todo.id}">完成</button>`;
+
+  // 根据优先级添加颜色class
+  let priorityClass = '';
+  if (todo.priority === 'low') priorityClass = 'priority-low';
+  else if (todo.priority === 'medium') priorityClass = 'priority-medium';
+  else if (todo.priority === 'high') priorityClass = 'priority-high';
+
   return `
-    <div class="todo-card ${todo.status === 'done' ? 'done' : ''} ${todo.overdue ? 'overdue' : ''}" data-id="${todo.id}">
+    <div class="todo-card ${todo.status === 'done' ? 'done' : ''} ${todo.overdue ? 'overdue' : ''} ${priorityClass}" data-id="${todo.id}">
       <div class="todo-main">
         <div class="todo-title">${esc(todo.title)} ${todoPriorityBadge(todo.priority)} ${todo.overdue ? '<span class="badge badge-danger">已过期</span>' : ''}</div>
         <div class="todo-meta">${esc(meta)}</div>
         ${todo.note ? `<div class="todo-note">${esc(todo.note)}</div>` : ''}
-        ${todo.images?.length ? `<div class="todo-image-strip">${todo.images.map((image) => `<img src="${todoImageUrl(todo.id, image.id)}" alt="待办图片">`).join('')}</div>` : ''}
+        ${todo.images?.length ? `<div class="todo-image-strip">${todo.images.map((image, index) => `<img src="${todoImageUrl(todo.id, image.id)}" alt="待办图片" class="todo-image-preview" data-src="${todoImageUrl(todo.id, image.id)}" data-todo-id="${todo.id}" data-index="${index}">`).join('')}</div>` : ''}
       </div>
       <div class="todo-actions">
         ${action}
@@ -976,6 +1027,20 @@ function renderTodos(todos) {
   });
   document.querySelectorAll('.todo-edit').forEach((button) => {
     button.addEventListener('click', () => showTodoDetail(Number(button.dataset.id)));
+  });
+  // 添加图片点击放大功能，支持左右切换
+  document.querySelectorAll('.todo-image-preview').forEach((img) => {
+    img.addEventListener('click', () => {
+      const todoId = img.dataset.todoId;
+      const imageIndex = Number(img.dataset.index);
+      const todo = todos.find(t => t.id === Number(todoId));
+      if (todo && todo.images && todo.images.length > 0) {
+        const allImageUrls = todo.images.map(image => todoImageUrl(todo.id, image.id));
+        showImagePreview(allImageUrls[imageIndex], allImageUrls, imageIndex);
+      } else {
+        showImagePreview(img.dataset.src);
+      }
+    });
   });
 }
 
@@ -1236,6 +1301,131 @@ async function deleteTodo(id) {
   loadTodos();
 }
 
+let currentImageIndex = 0;
+let currentImages = [];
+
+function showImagePreview(imageSrc, allImages = [], startIndex = 0) {
+  currentImages = allImages.length > 0 ? allImages : [imageSrc];
+  currentImageIndex = startIndex;
+
+  const hasPrev = currentImageIndex > 0;
+  const hasNext = currentImageIndex < currentImages.length - 1;
+  const counter = currentImages.length > 1 ? `<div class="image-counter">${currentImageIndex + 1} / ${currentImages.length}</div>` : '';
+
+  showModal(`
+    <div class="modal-content image-preview-modal">
+      <div class="image-preview-container" id="image-preview-container">
+        <button class="image-nav-btn image-nav-prev ${!hasPrev ? 'hidden' : ''}" id="image-prev-btn">‹</button>
+        <img src="${currentImages[currentImageIndex]}" alt="图片预览" class="image-preview-full" id="preview-image">
+        <button class="image-nav-btn image-nav-next ${!hasNext ? 'hidden' : ''}" id="image-next-btn">›</button>
+        ${counter}
+        <button class="image-close-btn" id="image-close-btn">×</button>
+      </div>
+    </div>`);
+
+  // 点击空白区域关闭
+  const container = document.getElementById('image-preview-container');
+  container.addEventListener('click', (e) => {
+    if (e.target === container || e.target.id === 'preview-image') {
+      closeModal();
+    }
+  });
+
+  // 关闭按钮
+  document.getElementById('image-close-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeModal();
+  });
+
+  // 左右切换按钮
+  document.getElementById('image-prev-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navigateImage(-1);
+  });
+
+  document.getElementById('image-next-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navigateImage(1);
+  });
+
+  // 键盘导航
+  document.addEventListener('keydown', handleImageKeydown);
+
+  // 触摸滑动支持
+  let touchStartX = 0;
+  let touchEndX = 0;
+
+  container.addEventListener('touchstart', (e) => {
+    touchStartX = e.changedTouches[0].screenX;
+  }, { passive: true });
+
+  container.addEventListener('touchend', (e) => {
+    touchEndX = e.changedTouches[0].screenX;
+    handleSwipe();
+  }, { passive: true });
+
+  function handleSwipe() {
+    const diff = touchStartX - touchEndX;
+    if (Math.abs(diff) > 50) { // 最小滑动距离
+      if (diff > 0 && hasNext) {
+        navigateImage(1); // 向左滑，下一张
+      } else if (diff < 0 && hasPrev) {
+        navigateImage(-1); // 向右滑，上一张
+      }
+    }
+  }
+}
+
+function navigateImage(direction) {
+  const newIndex = currentImageIndex + direction;
+  if (newIndex >= 0 && newIndex < currentImages.length) {
+    currentImageIndex = newIndex;
+    updateImagePreview();
+  }
+}
+
+function updateImagePreview() {
+  const img = document.getElementById('preview-image');
+  const prevBtn = document.getElementById('image-prev-btn');
+  const nextBtn = document.getElementById('image-next-btn');
+  const counter = document.querySelector('.image-counter');
+
+  if (img) {
+    img.src = currentImages[currentImageIndex];
+  }
+
+  if (prevBtn) {
+    prevBtn.classList.toggle('hidden', currentImageIndex === 0);
+  }
+
+  if (nextBtn) {
+    nextBtn.classList.toggle('hidden', currentImageIndex === currentImages.length - 1);
+  }
+
+  if (counter) {
+    counter.textContent = `${currentImageIndex + 1} / ${currentImages.length}`;
+  }
+}
+
+function handleImageKeydown(e) {
+  if (e.key === 'ArrowLeft') {
+    navigateImage(-1);
+  } else if (e.key === 'ArrowRight') {
+    navigateImage(1);
+  } else if (e.key === 'Escape') {
+    closeModal();
+  }
+}
+
+// 清理键盘事件监听
+const originalCloseModal = closeModal;
+closeModal = function() {
+  document.removeEventListener('keydown', handleImageKeydown);
+  currentImages = [];
+  currentImageIndex = 0;
+  originalCloseModal();
+};
+
 // ============ AI 工作台 Tab ============
 
 function actionLabel(action) {
@@ -1263,12 +1453,14 @@ function renderAiWorkbench() {
 
   let messagesHtml = '';
   if (chatMessages.length === 0) {
-    messagesHtml = '<div class="chat-welcome">你好！我是 HomeDash 家庭助手。<br>可以帮你管理库存、待办，也可以聊天和查资料。</div>';
+    messagesHtml = '<div class="chat-welcome">👋 你好！我是 HomeDash 家庭助手<br><br>我可以帮你管理库存、记录待办<br>也可以聊天和查资料</div>';
   } else {
     messagesHtml = chatMessages.map((msg) => {
       const label = msg.role === 'user' ? '你' : '助手';
       const bubbleClass = msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant';
-      return `<div class="chat-message ${msg.role}"><div class="chat-label">${label}</div><div class="chat-bubble ${bubbleClass}">${esc(msg.content)}</div></div>`;
+      // 用户消息使用 esc 转义，助手消息使用 Markdown 渲染
+      const content = msg.role === 'user' ? esc(msg.content) : renderMarkdown(msg.content);
+      return `<div class="chat-message ${msg.role}"><div class="chat-label">${label}</div><div class="chat-bubble ${bubbleClass}">${content}</div></div>`;
     }).join('');
   }
 
@@ -1286,7 +1478,7 @@ function renderAiWorkbench() {
       </div>
       <button class="ai-audit-toggle" id="ai-audit-toggle">📋 查看操作溯源 ▸</button>
       <div id="ai-audit-panel" class="ai-audit-panel">
-        <div id="ai-audit-list" class="audit-list"><div class="empty-state">加载中...</div></div>
+        <div id="ai-audit-list" class="audit-list"></div>
         <div id="audit-footer"></div>
       </div>
     </div>`;
@@ -1313,44 +1505,96 @@ function renderAiWorkbench() {
 function renderAuditRow(r) {
   const stageLabel = r.stage === 'parse' ? '解析' : r.stage === 'chat' ? '对话' : '执行';
   const okBadge = r.ok
-    ? '<span class="badge">成功</span>'
-    : '<span class="badge" style="background:var(--down);color:#fff">失败</span>';
+    ? '<span class="badge badge-ok">成功</span>'
+    : '<span class="badge badge-danger">失败</span>';
   const revertedTag = r.reverted ? '<span class="badge badge-outline">已撤回</span>' : '';
-  const model = r.llm_model ? `<span style="color:var(--muted)">${esc(r.llm_model)}</span>` : '';
-  const dur = r.duration_ms != null ? `${r.duration_ms}ms` : '';
-  const reply = r.llm_reply ? `<div style="color:var(--muted);font-size:0.85rem;margin-top:0.2rem">回复：${esc(r.llm_reply)}</div>` : '';
-  const err = r.error ? `<div style="color:var(--down);font-size:0.85rem;margin-top:0.2rem">错误：${esc(r.error)}</div>` : '';
-  let actionsHtml = '';
+  const time = r.created_at ? r.created_at.slice(5, 16).replace('T', ' ') : '';
+
+  // 用户问题（始终显示）
+  const question = r.raw_text || '无内容';
+
+  // 详情内容（点击展开）
+  let detailsHtml = '';
+
+  // AI回复（使用Markdown渲染）
+  if (r.llm_reply) {
+    const renderedReply = renderMarkdown(r.llm_reply);
+    detailsHtml += `<div class="audit-detail-reply">${renderedReply}</div>`;
+  }
+
+  // 错误信息
+  if (r.error) {
+    detailsHtml += `<div class="audit-detail-error">错误：${esc(r.error)}</div>`;
+  }
+
+  // 操作列表
   try {
     const acts = JSON.parse(r.actions_json || '[]');
-    actionsHtml = acts.map((a) => `<div class="history-item">${actionLabel(a)}</div>`).join('');
-  } catch { /* ponytail: 旧记录解析失败即忽略 */ }
-  let beforeAfter = '';
+    if (acts.length > 0) {
+      const actionsHtml = acts.map((a) => `<div class="audit-action-item">${actionLabel(a)}</div>`).join('');
+      detailsHtml += `<div class="audit-detail-actions"><div class="audit-detail-label">执行操作：</div>${actionsHtml}</div>`;
+    }
+  } catch { /* ignore */ }
+
+  // 前后对比
   try {
     const before = JSON.parse(r.before_json || '[]');
     const after = JSON.parse(r.after_json || '[]');
-    const parts = before.map((b, i) => {
-      const a = after[i] || {};
-      const bRow = b.row ? `前:${esc(b.row.name || '')}=${fmtNumber(b.row.current_stock)}` : '前:无';
-      const aRow = a.row ? `后:${esc(a.row.name || '')}=${fmtNumber(a.row.current_stock)}` : '后:已删';
-      return `<span style="color:var(--muted);font-size:0.8rem">${bRow} → ${aRow}</span>`;
-    });
-    beforeAfter = parts.join('<br>');
+    if (before.length > 0) {
+      const parts = before.map((b, i) => {
+        const a = after[i] || {};
+        const bRow = b.row ? `前: ${esc(b.row.name || '')} = ${fmtNumber(b.row.current_stock)}` : '前: 无';
+        const aRow = a.row ? `后: ${esc(a.row.name || '')} = ${fmtNumber(a.row.current_stock)}` : '后: 已删';
+        return `<div class="audit-compare-item">${bRow} → ${aRow}</div>`;
+      });
+      detailsHtml += `<div class="audit-detail-compare"><div class="audit-detail-label">数据变化：</div>${parts.join('')}</div>`;
+    }
   } catch { /* ignore */ }
+
+  // 元数据
+  const model = r.llm_model ? esc(r.llm_model) : '';
+  const dur = r.duration_ms != null ? `${r.duration_ms}ms` : '';
+  if (model || dur) {
+    detailsHtml += `<div class="audit-detail-meta">模型: ${model || '—'} · 耗时: ${dur || '—'}</div>`;
+  }
+
   const revertBtn = (r.stage === 'apply' && r.ok && !r.reverted)
-    ? `<button class="btn btn-small" data-revert="${r.id}">撤回</button>` : '';
+    ? `<button class="btn btn-small audit-revert-btn" data-revert="${r.id}">撤回</button>` : '';
+
   return `
-    <div class="audit-row" style="border-bottom:1px solid var(--border);padding:0.6rem 0;">
-      <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
-        ${okBadge} <span class="badge badge-outline">${stageLabel}</span> ${revertedTag}
-        <span style="color:var(--muted);font-size:0.8rem;margin-left:auto">${esc(r.created_at || '')} ${model} ${dur}</span>
-        ${revertBtn}
+    <div class="audit-row" data-audit-id="${r.id}">
+      <div class="audit-row-header" onclick="toggleAuditDetail(${r.id})">
+        <div class="audit-row-main">
+          <div class="audit-row-badges">
+            ${okBadge}
+            <span class="badge badge-outline">${stageLabel}</span>
+            ${revertedTag}
+          </div>
+          <div class="audit-row-question">${esc(question)}</div>
+        </div>
+        <div class="audit-row-meta">
+          <span class="audit-row-time">${time}</span>
+          <span class="audit-row-expand">▸</span>
+        </div>
       </div>
-      <div style="font-size:0.85rem;margin-top:0.2rem">${esc(r.raw_text || '')}</div>
-      ${reply}${err}
-      ${actionsHtml ? `<div style="margin-top:0.3rem">${actionsHtml}</div>` : ''}
-      ${beforeAfter ? `<div style="margin-top:0.2rem">${beforeAfter}</div>` : ''}
+      <div class="audit-row-details" id="audit-detail-${r.id}" style="display:none;">
+        ${detailsHtml}
+        ${revertBtn ? `<div class="audit-detail-actions-bar">${revertBtn}</div>` : ''}
+      </div>
     </div>`;
+}
+
+function toggleAuditDetail(auditId) {
+  const detail = document.getElementById(`audit-detail-${auditId}`);
+  const row = document.querySelector(`[data-audit-id="${auditId}"]`);
+  const expandIcon = row?.querySelector('.audit-row-expand');
+
+  if (detail && row && expandIcon) {
+    const isExpanded = detail.style.display !== 'none';
+    detail.style.display = isExpanded ? 'none' : 'block';
+    expandIcon.textContent = isExpanded ? '▸' : '▾';
+    row.classList.toggle('expanded', !isExpanded);
+  }
 }
 
 let auditOffset = 0;
@@ -1393,9 +1637,16 @@ async function loadAuditList(append = false) {
 }
 
 async function loadSuggestedChips() {
-  const { ok, data } = await fetchJSON(`${API.aiSuggestedChips}?days=30&count=4`);
-  const chips = (ok && data?.chips) ? data.chips
-    : ['加 10 包方便面', '用掉 2 卷卫生纸', '新建待办换滤芯', '现在有什么要买的'];
+  // 固定显示7个日常消耗快捷词条
+  const chips = [
+    '吃一个鸡蛋',
+    '吃一包方便面',
+    '喝了一罐啤酒',
+    '吃了一个面包',
+    '用一包抽纸',
+    '用一包湿巾',
+    '最近有什么需要购买的'
+  ];
   const container = document.querySelector('.ai-chips');
   if (!container) return;
   container.innerHTML = chips.map((text) =>
