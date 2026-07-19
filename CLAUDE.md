@@ -45,6 +45,7 @@ python -m app.modules.setup
 - **鉴权 `app/modules/auth.py`**：`hashlib.scrypt` + 每用户随机 salt；会话原始 token 只放 Cookie，库里只存 SHA-256 摘要。`current_user(request)` / `require_admin(request)` 是路由依赖。`/api/agent/todos/*` 走**独立** `AGENT_API_TOKEN`（`X-HomeDash-Token` 或 `Authorization: Bearer`），**不**吃浏览器 Cookie。
 - **库存方向（P0 bug）**：`/usage` **减**库存、`/purchase` **加**库存。写反即严重缺陷。
 - **AI 工作台两层结构**：`ai_workbench.py`（LLM 调用 + JSON 白名单校验 + 全流程审计）与 `ai_executor.py`（按 `op` 调 items/todos 业务函数写库）。LLM **只产出白名单 actions**，绝不执行任意 SQL；字段名 `name`/`item_name` 在执行器里归一为 `name`。家庭顾问聊天可选调 Brave Search（`BRAVE_API_KEY`）联网。
+- **配置热加载**：LLM/SMTP/Brave/Agent Token 可在设置页配置，保存到 `data/*.json`（`setup.py` 模块），立即生效无需重启。环境变量优先级高于文件配置。
 - **同步 IO 必须包 `asyncio.to_thread`**：SMTP 发信、`hashlib.scrypt` 都在 to_thread 里跑，不得在 async 路由里直接阻塞事件循环。
 - **预测 `predict_item`**（`items.py`）：纯函数；相邻 usage 区间 EWMA + 安全库存，冷启动走购买间隔 / 品类先验 / min_stock 兜底。
 - **前端 `app/static/*`**：单页 `index.html` + vanilla `app.js` + 浅色 `style.css`。三 Tab：AI 工作台 / 日用品 / 重点待办。改前端只动这三个文件，无打包、无 TS、无框架。
@@ -61,8 +62,8 @@ python -m app.modules.setup
 
 | 文件 | 用途 |
 |------|------|
-| `AGENTS.md` | **强制规则**（§0 总则 / DoD / 密钥 / 禁区 / 代码约定 / 模块地图） |
+| `AGENTS.md` | **强制规则**（§0 总则 / DoD / 密钥 / 禁区 / 代码约定 / 模块地图 / 配置热加载） |
 | `DEVPLAN.md` | 待办规格书（未完成项以它为准；含各待办「明确不做」清单，整节禁止实现） |
 | `README.md` | 对外说明，功能状态表与 API 全表（须与代码同步） |
 | `DESIGN.md` | 设计背景，**可能过时**，不得单独当作「已实现」依据 |
-| `agent-skill/homedash-agent/SKILL.md` | 给外部 Hermes/AI 操作面板用的接口说明 |
+| `agent-skill/homedash-agent/SKILL.md` | 给外部 Hermes/AI 操作面板用的接口说明（v1.2，含图片附件、配置管理） |

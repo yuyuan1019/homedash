@@ -1,7 +1,7 @@
 ---
 name: homedash-agent
 description: "HomeDash 家庭面板 agent 接口：重点待办 CRUD、提醒查询、库存/预测操作。通过 HTTP 调用自托管的 HomeDash API 让 agent 直接操作用户的待办与日用品库存。"
-version: 1.1
+version: 1.2
 tags: [homedash, todos, inventory, agent, http]
 triggers:
   - 用户提到 HomeDash / 家庭面板 / 重点待办 / 库存
@@ -31,12 +31,15 @@ HomeDash 是用户自托管的家庭管理面板。本 skill 让 agent 通过 HT
 
 端点分两类：
 - **普通端点** `/api/todos/*`、`/api/items/*`：无鉴权（依赖网络隔离）
-- **Agent 端点** `/api/agent/*`：需要 header `X-Homedash-Token: ${TOKEN}` 或 `Authorization: Bearer ${TOKEN}`
+- **Agent 端点** `/api/agent/*`：需要 header `X-HomeDash-Token: ${TOKEN}` 或 `Authorization: Bearer ${TOKEN}`
 
 **Token 来源**：
 - HomeDash 部署目录的 `.env` 文件中 `AGENT_API_TOKEN`
+- 或在 `data/agent_config.json` 中配置（管理员可在设置页查看/配置）
 - 如果未设置该变量，则跳过校验（不推荐生产环境）
-- 问用户「你的 AGENT_API_TOKEN 是什么？」或让用户从 `.env` 中读取
+- 问用户「你的 AGENT_API_TOKEN 是什么？」或让用户从 `.env` / 设置页中读取
+
+**注意**：设置页可查看 Token 掩码状态，但完整 Token 只能从配置文件或环境变量获取。
 
 ## 2. 重点待办 API
 
@@ -52,6 +55,9 @@ HomeDash 是用户自托管的家庭管理面板。本 skill 让 agent 通过 HT
 | 标记完成 | POST | `/agent/todos/{id}/done` | |
 | 改提醒 | PUT | `/agent/todos/{id}/remind` | body: remind_at/remind_channels/remind_repeat |
 | 标记提醒已发 | POST | `/agent/todos/{id}/remind-fired` | body: channel/delivered_at/external_ref |
+| 上传图片 | POST | `/todos/{id}/images` | 表单上传，最多 5 张，每张 10MB |
+| 读取图片 | GET | `/todos/{id}/images/{image_id}` | 返回图片二进制 |
+| 删除图片 | DELETE | `/todos/{id}/images/{image_id}` | 移除图片附件 |
 
 **创建待办 body（TodoIn）**：
 
@@ -77,7 +83,7 @@ HomeDash 是用户自托管的家庭管理面板。本 skill 让 agent 通过 HT
 - `remind_channels`：提醒频道标识（如 `qq`/`wechat`/`telegram`），由外部系统投递
 - `remind_repeat`：none/once/daily/weekly
 
-**返回字段**：id, title, note, priority, due_date, assignee, status, remind_at, remind_channels, remind_repeat, external_ref, overdue (bool), created_at, updated_at, completed_at.
+**返回字段**：id, title, note, priority, due_date, assignee, status, remind_at, remind_channels, remind_repeat, external_ref, overdue (bool), created_at, updated_at, completed_at, images (列表).
 
 **提醒消息模板**（`/agent/todos/due` 返回的 `message` 字段）：
 ```
@@ -85,6 +91,12 @@ HomeDash 是用户自托管的家庭管理面板。本 skill 让 agent 通过 HT
 截止 {due_date} · {高/中/低}优先级 · {assignee}
 {note}
 ```
+
+**图片附件**：
+- 支持 JPG、PNG、GIF、WebP 格式
+- 每个待办最多 5 张图片，每张最大 10MB
+- 上传使用 multipart/form-data，字段名 `file`
+- 返回的 `images` 字段是 `{id, filename, content_type}` 列表
 
 ## 3. 日用品库存 API
 
@@ -114,24 +126,38 @@ HomeDash 是用户自托管的家庭管理面板。本 skill 让 agent 通过 HT
 
 **库存方向**：`usage` 减库存，`purchase` 加库存。**写反是 P0 bug**。
 
-## 4. HTTP 请求模板
+## 4. AI 工作台相关（可选）
+
+如果需要通过 AI 工作台间接操作，可以使用以下端点（需要浏览器会话登录，agent 不常用）：
+
+| 操作 | 方法 | 路径 | 说明 |
+|------|------|------|------|
+| 解析指令 | POST | `/api/ai/parse` | 解析自然语言为动作预览 |
+| 执行动作 | POST | `/api/ai/apply` | 执行白名单动作 |
+| 家庭顾问 | POST | `/api/ai/chat` | 聊天（可选联网搜索） |
+| 审计记录 | GET | `/api/ai/audit` | 查询 AI 操作历史 |
+| 撤回操作 | POST | `/api/ai/revert` | 撤回某条 AI 写操作 |
+
+**注意**：这些端点需要面板登录会话，不适合外部 agent 直接调用。Agent 应优先使用 `/api/agent/*` 端点。
+
+## 5. HTTP 请求模板
 
 **列未完成的待办（带 token）**：
 ```bash
-curl -s -H "X-Homedash-Token: ${TOKEN}" '${HOMEDASH_URL}/api/agent/todos/open' | jq
+curl -s -H "X-HomeDash-Token: ${TOKEN}" '${HOMEDASH_URL}/api/agent/todos/open' | jq
 ```
 
 **创建高优先级待办，明天 9 点提醒**：
 ```bash
 curl -s -X POST \
-  -H "X-Homedash-Token: ${TOKEN}" \
+  -H "X-HomeDash-Token: ${TOKEN}" \
   -H 'Content-Type: application/json' \
   '${HOMEDASH_URL}/api/agent/todos' \
   -d '{
     "title": "洗车",
     "priority": "high",
-    "due_date": "2026-07-16",
-    "remind_at": "2026-07-16T09:00:00",
+    "due_date": "2026-07-20",
+    "remind_at": "2026-07-20T09:00:00",
     "remind_channels": ["qq"]
   }'
 ```
@@ -149,7 +175,15 @@ curl -s -X POST \
   -d '{"amount": 0.5, "note": "洗手"}'
 ```
 
-## 5. 常见 agent 对话 → API 映射
+**上传待办图片**：
+```bash
+curl -s -X POST \
+  -H "X-HomeDash-Token: ${TOKEN}" \
+  -F "file=@/path/to/image.jpg" \
+  '${HOMEDASH_URL}/api/todos/1/images'
+```
+
+## 6. 常见 agent 对话 → API 映射
 
 | 用户说 | 动作 |
 |--------|------|
@@ -162,8 +196,9 @@ curl -s -X POST \
 | 「哪些东西要买了」 | GET `/items/predictions`，读 need_buy |
 | 「刚买了 2 瓶洗手液」 | POST `/items/{id}/purchase` with amount=2 |
 | 「用了 1 卷纸」 | POST `/items/{id}/usage` with amount=1 |
+| 「上传这个待办的照片」 | POST `/todos/{id}/images` with multipart file |
 
-## 6. 陷阱与注意事项
+## 7. 陷阱与注意事项
 
 - **时间格式**：`remind_at` 必须 ISO（`2026-07-20T09:00:00`），缺时区则按服务器时区解析
 - **due_date**：必须 `YYYY-MM-DD`，不能带时间
@@ -173,20 +208,39 @@ curl -s -X POST \
 - **物品 ID**：创建后返回 `{id: N}`，后续操作需这个 id。如果用户只给名字，先 GET `/items` 找 id
 - **agent 端点 vs 普通端点**：`/agent/*` 要 token；普通 `/todos`、`/items` 不要。优先用 `/agent/*`（语义更明确、支持过滤）
 - **服务未启动时**：`curl` 会 connection refused。先确认 HomeDash 是否运行
+- **图片上传**：注意文件大小限制（10MB）和数量限制（5 张/待办）
+- **Token 配置**：环境变量 `AGENT_API_TOKEN` 优先级高于 `data/agent_config.json`
 
-## 7. 与定时任务配合
+## 8. 与定时任务配合
 
 典型场景：每天早上 8 点推送今日待办。
 
 ```bash
 # 查询今日到期的待办
-curl -s -H "X-Homedash-Token: ${TOKEN}" \
+curl -s -H "X-HomeDash-Token: ${TOKEN}" \
   '${HOMEDASH_URL}/api/agent/todos/due?within_minutes=1440&channel=qq'
 
 # 如果有 items，逐条推送给用户；如果没有，静默
 ```
 
-## 8. 自检
+## 9. 配置管理
+
+HomeDash 支持两种配置方式：
+
+1. **环境变量**（`.env` 文件）：传统方式，需要重启服务
+2. **设置页面**（管理员）：Web UI 配置，热加载无需重启
+
+**Agent Token 配置**：
+- 环境变量：`AGENT_API_TOKEN` in `.env`
+- 文件配置：`data/agent_config.json`（设置页可查看掩码）
+- 优先级：环境变量 > 文件配置
+
+**LLM/SMTP/Brave 配置**：
+- 文件路径：`data/llm_config.json`、`data/notify_config.json`、`data/brave_config.json`
+- 管理员可在设置页面配置，保存后立即生效
+- 支持连通性测试
+
+## 10. 自检
 
 **健康检查**：
 ```bash
@@ -195,10 +249,15 @@ curl -sf '${HOMEDASH_URL}/api/todos/summary' | jq .
 
 **Token 可用性**：
 ```bash
-curl -sf -H "X-Homedash-Token: ${TOKEN}" \
+curl -sf -H "X-HomeDash-Token: ${TOKEN}" \
   '${HOMEDASH_URL}/api/agent/todos/open' | jq .
+```
+
+**配置状态查询**（需要管理员登录）：
+```bash
+curl -sf -b cookies.txt '${HOMEDASH_URL}/api/setup/status' | jq .
 ```
 
 ---
 
-_最后更新：2026-07-15 · v1.1 通用化版本 · 基于 HomeDash 代码现状（todos.py / items.py）_
+_最后更新：2026-07-19 · v1.2 添加图片附件、配置管理、AI 工作台端点 · 基于 HomeDash 代码现状（todos.py / items.py / setup.py）_

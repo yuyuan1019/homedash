@@ -1,13 +1,17 @@
 # HomeDash - 家庭管理面板
 
+> **最后更新：2026-07-19**  
+> 本文档提供系统设计背景与架构说明。功能以**代码与 README.md** 为准；本文档可能滞后，冲突时以 `AGENTS.md` 与运行中代码为准。
+
 ## 概述
 
 一个轻量自托管 Web 应用，整合以下功能模块：
 1. **日用品管理** — 记录消耗/购买，EWMA + 安全库存预测补货
-2. **重点待办** — 家庭 to-do；预留 **home agent HTTP 接口** 以便定时提醒投递到 QQ/微信；并进入 SMTP 周报
-3. **AI 工作台** — 自然语言操作家庭数据：LLM 生成白名单动作 → 确认后写库存/待办等；**禁止直接 SQL**。家庭顾问聊天可选调 Brave Search 联网
+2. **重点待办** — 家庭 to-do；预留 **home agent HTTP 接口** 以便定时提醒投递到 QQ/微信；支持图片附件；并进入 SMTP 周报
+3. **AI 工作台** — 自然语言操作家庭数据：LLM 生成白名单动作 → 确认后写库存/待办等；**禁止直接 SQL**。家庭顾问聊天可选调 Brave Search 联网；支持操作撤回与审计
 4. **面板登录与用户管理** — 长期 Cookie 会话；管理员/普通用户两级权限
 5. **SMTP 周报** — 每周汇总库存需买 + 未完成待办发到 QQ 邮箱
+6. **系统设置** — 管理员可在 Web UI 配置 LLM、SMTP、Brave Search、Agent Token，热加载无需重启
 
 > 米家设备控制与 Uptime 监控功能已于 2026-07-19 下线，相关模块、依赖、Tab 全部移除。详见 `DEVPLAN.md` 顶部说明。
 
@@ -142,13 +146,14 @@ GET    /api/items/predictions        - 全部预测汇总
 
 ### 2. 重点待办
 
-家庭 to-do CRUD + `/api/agent/todos/*` 供外部 Hermes / AI 查询到点提醒。字段包括标题、备注、优先级、截止日期、图片附件；提醒时间 / 频道 / 重复策略作为 home agent 的元数据在后端保留，面板表单不再展示。
+家庭 to-do CRUD + `/api/agent/todos/*` 供外部 Hermes / AI 查询到点提醒。字段包括标题、备注、优先级、截止日期、图片附件（最多 5 张，每张 10MB，支持 JPG/PNG/GIF/WebP）；提醒时间 / 频道 / 重复策略作为 home agent 的元数据在后端保留，面板表单不再展示。
 
 ### 3. AI 工作台
 
 - LLM 只输出白名单 JSON（op ∈ items / todos / query.*）；服务端校验后写库
-- 每次 parse / apply 均落 `ai_audit`，含 before/after 快照，支持按条撤回
+- 每次 parse / apply 均落 `ai_audit`，含 before/after 快照，支持按条撤回（`/api/ai/revert/{action_id}`）
 - 家庭顾问聊天独立入口（`/api/ai/chat`），可选调 Brave Search 联网（`BRAVE_API_KEY`）
+- 物品分类预测（`/api/ai/item-category`）、建议快捷片段（`/api/ai/suggested-chips`）
 
 ### 4. 面板登录与用户管理
 
@@ -162,6 +167,17 @@ GET    /api/items/predictions        - 全部预测汇总
 - QQ 邮箱 SMTP 授权码，465 走 SSL，其他端口走 STARTTLS
 - 汇总未完成重点待办 + 需购买日用品
 - 通过面板设置页或 `.env` 配置；`POST /api/notify/weekly` 触发
+
+### 6. 系统设置（setup.py）
+
+管理员专属设置页面（`/api/setup/*`），支持：
+- **配置状态总览**：显示 LLM、SMTP、Brave Search、Agent Token 的配置状态
+- **LLM 配置**：Base URL、API Key、模型选择、超时设置；支持获取上游模型列表、测试连接
+- **SMTP 配置**：SMTP 服务器、端口、授权码、收件人；支持测试登录和试发周报
+- **Brave Search 配置**：API Key 配置与测试（可选）
+- **Agent Token 配置**：查看掩码状态、保存到 `data/agent_config.json`
+
+**配置热加载**：LLM/SMTP/Brave 配置保存到 `data/*.json`，立即生效无需重启容器。环境变量优先级高于文件配置。
 
 ## 前端页面布局
 
@@ -228,13 +244,20 @@ homedash/
 | 变量 | 说明 |
 |------|------|
 | `HOMEDASH_PORT` | 对外端口 |
-| `SMTP_*` / `NOTIFY_*` | QQ 邮箱 SMTP 周报 |
-| `LLM_*` / `AI_*` | AI 工作台 |
-| `BRAVE_API_KEY` | 家庭顾问联网搜索（可选） |
-| `AGENT_API_TOKEN` | home agent 接口 |
+| `SMTP_*` / `NOTIFY_*` | QQ 邮箱 SMTP 周报（可在设置页配置） |
+| `LLM_*` / `AI_*` | AI 工作台（可在设置页配置） |
+| `BRAVE_API_KEY` | 家庭顾问联网搜索（可在设置页配置，可选） |
+| `AGENT_API_TOKEN` | home agent 接口（环境变量优先，也可在设置页查看/配置文件） |
 | `HOMEDASH_PUBLIC_URL` | 邮件里的面板链接 |
 
 完整注释模板见 `.env.example`。
+
+### 配置方式优先级
+
+1. **环境变量**（`.env` 文件）— 优先级最高，需要重启服务
+2. **文件配置**（`data/*.json`）— 设置页保存，热加载无需重启
+
+管理员可在设置页面配置 LLM、SMTP、Brave、Agent Token，保存后立即生效。环境变量与文件配置并存时，环境变量优先。
 
 ## 开发命令
 

@@ -150,11 +150,11 @@ python -m app.modules.setup
 | 模块文件 | 状态 | 职责 |
 |----------|------|------|
 | `app/modules/items.py` | ✅ | 日用品 + EWMA / 安全库存预测 |
-| `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API |
-| `app/modules/notify.py` | ✅ | SMTP 周报（库存 + 重点待办） |
-| `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、字段归一、全流程审计；家庭顾问聊天可选 Brave Search |
-| `app/modules/ai_executor.py` | ✅ | 白名单写库；`_item_name` 归一 name/item_name |
-| `app/modules/setup.py` | ✅ | 配置状态、LLM / SMTP / Brave 配置读写与测试 |
+| `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API + 图片附件（最多 5 张，10MB/张） |
+| `app/modules/notify.py` | ✅ | SMTP 周报（库存 + 重点待办）；支持热加载配置 |
+| `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、字段归一、全流程审计；家庭顾问聊天可选 Brave Search；支持物品分类预测、操作撤回、建议快捷片段 |
+| `app/modules/ai_executor.py` | ✅ | 白名单写库；`_item_name` 归一 name/item_name；记录前后快照 |
+| `app/modules/setup.py` | ✅ | 配置状态、LLM / SMTP / Brave / Agent Token 配置读写与测试；支持热加载 |
 | `app/modules/auth.py` | ✅ | 首个管理员、scrypt 密码、180 天长期会话、面板 API 鉴权依赖 |
 | `app/modules/users.py` | ✅ | 管理员用户 CRUD、角色边界、重置密码与会话废止 |
 | `app/database.py` | ✅ | 单例 DB；业务表 + `users` / `auth_sessions`；`_ensure_columns` 给旧库补列 |
@@ -174,6 +174,16 @@ python -m app.modules.setup
 - 模板：`.env.example`（可含规划变量注释）  
 - 当前：`HOMEDASH_PORT`  
 - 已用/可选：`SMTP_*` `NOTIFY_*` `LLM_*` `AI_*` `BRAVE_API_KEY` `AGENT_API_TOKEN` `HOMEDASH_PUBLIC_URL`
+
+### 配置热加载（2026-07-19 新增）
+
+管理员可在设置页面配置以下项，保存到 `data/` 目录的 JSON 文件，**无需重启容器**：
+- LLM 配置：`data/llm_config.json`（Base URL、API Key、模型、超时）
+- SMTP 配置：`data/notify_config.json`（SMTP 服务器、授权码、收件人）
+- Brave Search：`data/brave_config.json`（API Key）
+- Agent Token：`data/agent_config.json`（仅在环境变量未设置时生效）
+
+**优先级**：环境变量 > data/*.json 文件配置。设置页读取时会自动合并两种来源。
 
 ## 当前阶段
 

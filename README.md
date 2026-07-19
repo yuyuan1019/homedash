@@ -376,8 +376,17 @@ python -m app.modules.setup        # LLM / SMTP / Brave 配置读写与掩码
 | GET / POST | `/api/notify/config`、`/test`、`/weekly` | SMTP 配置状态、试发、周报 |
 | POST | `/api/ai/parse`、`/apply` | AI 解析预览、确认写入 |
 | POST | `/api/ai/chat` | 家庭顾问聊天（可选联网搜索） |
+| POST | `/api/ai/item-category` | LLM 预测物品分类 |
 | GET | `/api/ai/audit` | AI 写库审计记录 |
-| POST | `/api/ai/revert` | 撤回某条 AI 写操作 |
+| GET | `/api/ai/suggested-chips` | 获取建议操作快捷片段 |
+| POST | `/api/ai/revert/{action_id}` | 撤回某条 AI 写操作 |
+| GET | `/api/setup/status` | 配置总览（LLM/SMTP/Brave/Agent 状态） |
+| GET / POST | `/api/setup/llm/config`、`/save`、`/test` | LLM 配置读取、保存、测试连接 |
+| GET | `/api/setup/llm/models` | 获取上游可用模型列表 |
+| GET / POST | `/api/setup/brave/config`、`/save`、`/test` | Brave Search 配置 |
+| GET / POST | `/api/setup/agent/config`、`/save` | Agent Token 配置 |
+| GET / POST | `/api/setup/notify/config`、`/save`、`/test` | SMTP 配置（热加载） |
+| GET | `/api/setup/env-snippet` | 生成 .env 配置片段 |
 
 静态页：`/`、`/app.js`、`/style.css`。
 
