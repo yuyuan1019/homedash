@@ -88,6 +88,20 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     expires_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
+CREATE TABLE IF NOT EXISTS travel_plans (
+    id INTEGER PRIMARY KEY,
+    destination TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    travelers INTEGER NOT NULL DEFAULT 1,
+    activities TEXT,
+    notes TEXT,
+    weather_summary TEXT,
+    weather_source TEXT,
+    packing_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
 """

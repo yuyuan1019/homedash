@@ -38,6 +38,10 @@ const API = {
   setupNotifySave: '/api/setup/notify/save',
   setupNotifyTest: '/api/setup/notify/test',
   notifyTest: '/api/notify/test',
+  travelPlans: '/api/travel/plans',
+  travelPlan: (id) => `/api/travel/plans/${id}`,
+  travelRecommend: (id) => `/api/travel/plans/${id}/recommend`,
+  travelPacking: (id) => `/api/travel/plans/${id}/packing`,
 };
 
 let currentTab = 'ai';
@@ -85,6 +89,19 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   }[c]));
+}
+
+// 从后端错误响应里提取可读提示：FastAPI 422 的 detail 是数组，直接 toast 会显示成 [object Object]
+function detailMsg(data, fallback = '操作失败') {
+  const d = data?.detail;
+  if (typeof d === 'string' && d) return d;
+  if (Array.isArray(d) && d.length) {
+    const first = d[0];
+    if (typeof first === 'string') return first;
+    const loc = Array.isArray(first?.loc) ? first.loc.filter((x) => x !== 'body').join('.') : '';
+    return first?.msg ? (loc ? `${loc}: ${first.msg}` : first.msg) : fallback;
+  }
+  return fallback;
 }
 
 // 简单的 Markdown 渲染函数
@@ -144,7 +161,9 @@ function fmtNumber(n) {
 }
 
 function todayInput() {
-  return new Date().toISOString().split('T')[0];
+  // 用本地日期，避免 UTC 折算导致默认值差一天
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 // 拦截 modal 关闭按钮
@@ -164,6 +183,7 @@ function switchTab(tab) {
   if (tab === 'todos') loadTodos();
   if (tab === 'ai') renderAiWorkbench();
   if (tab === 'setup') loadSetup();
+  if (tab === 'travel') loadTravelPlans();
 }
 
 function initTabs() {
@@ -174,7 +194,7 @@ function initTabs() {
   // 滑动切换 tab
   let touchStartX = 0;
   let touchStartY = 0;
-  const tabOrder = ['ai', 'items', 'todos'];
+  const tabOrder = ['ai', 'items', 'todos', 'travel'];
   
   document.addEventListener('touchstart', (e) => {
     touchStartX = e.touches[0].clientX;
@@ -182,6 +202,7 @@ function initTabs() {
   }, { passive: true });
   
   document.addEventListener('touchend', (e) => {
+    if (!document.getElementById('modal').classList.contains('hidden')) return;  // 弹窗打开时不拦截滑动切 Tab
     const touchEndX = e.changedTouches[0].clientX;
     const touchEndY = e.changedTouches[0].clientY;
     const diffX = touchStartX - touchEndX;
@@ -201,6 +222,110 @@ function initTabs() {
       }
     }
   }, { passive: true });
+}
+
+// ============ 旅游计划 Tab ============
+
+let travelPlans = [];
+
+async function loadTravelPlans() {
+  const container = document.getElementById('tab-travel');
+  container.innerHTML = '<div class="loading">加载旅游计划...</div>';
+  const { ok, data } = await fetchJSON(API.travelPlans);
+  if (!ok) {
+    // 加载失败也保留「新建行程」入口，避免空白页无从恢复
+    container.innerHTML = `<div class="section-header"><div><h2>🧳 旅游计划</h2></div><button class="btn btn-primary" id="travel-add">＋ 新建行程</button></div><div class="empty">${esc(detailMsg(data, '加载失败'))}</div>`;
+    document.getElementById('travel-add').addEventListener('click', () => showTravelForm());
+    return;
+  }
+  travelPlans = data || [];
+  container.innerHTML = `
+    <div class="section-header"><div><h2>🧳 旅游计划</h2><p class="section-subtitle">结合目的地、日期和天气生成可编辑行李清单</p></div><button class="btn btn-primary" id="travel-add">＋ 新建行程</button></div>
+    <div class="travel-list">${travelPlans.length ? travelPlans.map(renderTravelCard).join('') : '<div class="empty">还没有行程，先创建一个旅游计划吧。</div>'}</div>`;
+  document.getElementById('travel-add').addEventListener('click', () => showTravelForm());
+  container.querySelectorAll('[data-travel-action]').forEach((btn) => btn.addEventListener('click', () => handleTravelAction(btn.dataset.travelAction, Number(btn.dataset.id))));
+  container.querySelectorAll('.packing-check').forEach((box) => box.addEventListener('change', () => togglePacked(Number(box.dataset.id), Number(box.dataset.index), box.checked)));
+}
+
+function renderTravelCard(plan) {
+  const items = plan.packing_items || [];
+  const packed = items.filter((item) => item.packed).length;
+  return `<article class="travel-card">
+    <div class="travel-card-head"><div><h3>${esc(plan.destination)}</h3><div class="item-meta">${esc(plan.start_date)} 至 ${esc(plan.end_date)} · ${plan.travelers} 人${plan.activities ? ` · ${esc(plan.activities)}` : ''}</div></div>
+      <div class="travel-actions"><button class="btn btn-small" data-travel-action="edit" data-id="${plan.id}">编辑</button><button class="btn btn-small btn-danger" data-travel-action="delete" data-id="${plan.id}">删除</button></div></div>
+    ${plan.notes ? `<div class="travel-notes muted">📝 ${esc(plan.notes)}</div>` : ''}
+    ${plan.weather_summary ? `<div class="weather-summary"><b>天气参考：</b>${esc(plan.weather_summary)}<span class="badge badge-outline">${esc(plan.weather_source || '')}</span></div>` : '<div class="weather-summary muted">尚未生成天气与行李建议</div>'}
+    <div class="packing-head"><b>行李清单 ${items.length ? `${packed}/${items.length}` : ''}</b><div><button class="btn btn-small" data-travel-action="packing" data-id="${plan.id}">${items.length ? '编辑清单' : '手动添加'}</button> <button class="btn btn-primary btn-small" data-travel-action="recommend" data-id="${plan.id}">${items.length ? '重新生成' : 'AI 生成建议'}</button></div></div>
+    <div class="packing-list">${items.length ? items.map((item, index) => `<label class="packing-row ${item.packed ? 'packed' : ''}"><input class="packing-check" data-id="${plan.id}" data-index="${index}" type="checkbox" ${item.packed ? 'checked' : ''}><span><b>${esc(item.name)}</b> · ${esc(item.quantity)} <small>${esc(item.category)}${item.note ? ` · ${esc(item.note)}` : ''}</small></span></label>`).join('') : ''}</div>
+  </article>`;
+}
+
+function showTravelForm(plan = null) {
+  showModal(`<div class="modal-content"><button class="close-btn">×</button><h2>${plan ? '编辑' : '新建'}旅游计划</h2><form id="travel-form">
+    <div class="form-group"><label>目的地</label><input id="travel-destination" required maxlength="100" value="${esc(plan?.destination || '')}" placeholder="例如：成都"></div>
+    <div class="form-row"><div class="form-group"><label>开始日期</label><input id="travel-start" type="date" required value="${esc(plan?.start_date || todayInput())}"></div><div class="form-group"><label>结束日期</label><input id="travel-end" type="date" required value="${esc(plan?.end_date || todayInput())}"></div></div>
+    <div class="form-group"><label>出行人数</label><input id="travel-people" type="number" min="1" max="30" required value="${plan?.travelers || 1}"></div>
+    <div class="form-group"><label>活动偏好</label><input id="travel-activities" maxlength="500" value="${esc(plan?.activities || '')}" placeholder="例如：徒步、美食、亲子"></div>
+    <div class="form-group"><label>补充备注</label><textarea id="travel-notes" maxlength="1000" placeholder="例如：带儿童、容易晕车">${esc(plan?.notes || '')}</textarea></div>
+    <div class="modal-actions"><button type="button" class="btn modal-cancel">取消</button><button class="btn btn-primary" type="submit">保存</button></div></form></div>`);
+  bindModalClose();
+  document.getElementById('travel-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const payload = { destination: document.getElementById('travel-destination').value.trim(), start_date: document.getElementById('travel-start').value, end_date: document.getElementById('travel-end').value, travelers: Number(document.getElementById('travel-people').value), activities: document.getElementById('travel-activities').value.trim(), notes: document.getElementById('travel-notes').value.trim() };
+    const { ok, data } = await fetchJSON(plan ? API.travelPlan(plan.id) : API.travelPlans, { method: plan ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+    if (!ok) { toast(detailMsg(data, '保存失败'), 'error'); return; }
+    closeModal(); toast('旅游计划已保存', 'success'); loadTravelPlans();
+  });
+}
+
+async function handleTravelAction(action, id) {
+  const plan = travelPlans.find((item) => item.id === id);
+  if (!plan) return;
+  if (action === 'edit') return showTravelForm(plan);
+  if (action === 'packing') return showPackingEditor(plan);
+  if (action === 'delete') {
+    if (!confirm(`确定删除“${plan.destination}”旅游计划吗？`)) return;
+    const { ok, data } = await fetchJSON(API.travelPlan(id), { method: 'DELETE' });
+    if (!ok) return toast(detailMsg(data, '删除失败'), 'error');
+    toast('旅游计划已删除', 'success'); return loadTravelPlans();
+  }
+  if (action === 'recommend') {
+    if ((plan.packing_items || []).length && !confirm('重新生成会替换当前清单，已勾选的物品将按名称保留勾选状态。确定继续吗？')) return;
+    toast('正在查询天气并生成行李建议...');
+    const { ok, data } = await fetchJSON(API.travelRecommend(id), { method: 'POST' });
+    if (!ok) return toast(detailMsg(data, '生成失败'), 'error');
+    toast('行李建议已生成，可继续修改', 'success'); return loadTravelPlans();
+  }
+}
+
+function showPackingEditor(plan) {
+  const items = (plan.packing_items || []).map((item) => ({ ...item }));
+  const renderRows = () => {
+    document.getElementById('packing-edit-list').innerHTML = items.map((item, index) => `<div class="packing-edit-row"><input data-field="name" data-index="${index}" value="${esc(item.name)}" placeholder="物品"><input data-field="quantity" data-index="${index}" value="${esc(item.quantity)}" placeholder="数量"><input data-field="category" data-index="${index}" value="${esc(item.category)}" placeholder="分类"><input data-field="note" data-index="${index}" value="${esc(item.note || '')}" placeholder="备注"><button type="button" class="btn btn-small btn-danger packing-remove" data-index="${index}">删除</button></div>`).join('');
+    document.querySelectorAll('#packing-edit-list input').forEach((input) => input.addEventListener('input', () => { items[Number(input.dataset.index)][input.dataset.field] = input.value; }));
+    document.querySelectorAll('.packing-remove').forEach((btn) => btn.addEventListener('click', () => { items.splice(Number(btn.dataset.index), 1); renderRows(); }));
+  };
+  showModal(`<div class="modal-content modal-wide"><button class="close-btn">×</button><h2>编辑 ${esc(plan.destination)} 行李清单</h2><div id="packing-edit-list"></div><button type="button" class="btn" id="packing-add">＋ 添加一项</button><div class="modal-actions"><button type="button" class="btn modal-cancel">取消</button><button class="btn btn-primary" id="packing-save">保存清单</button></div></div>`);
+  bindModalClose(); renderRows();
+  document.getElementById('packing-add').addEventListener('click', () => { items.push({ name: '', quantity: '1', category: '其他', note: '', packed: false }); renderRows(); });
+  document.getElementById('packing-save').addEventListener('click', async () => {
+    const clean = items.filter((item) => item.name.trim()).map((item) => ({ ...item, name: item.name.trim(), quantity: item.quantity || '1', category: item.category || '其他' }));
+    const { ok, data } = await fetchJSON(API.travelPacking(plan.id), { method: 'PUT', body: JSON.stringify({ items: clean }) });
+    if (!ok) return toast(detailMsg(data, '保存失败'), 'error');
+    closeModal(); toast('行李清单已保存', 'success'); loadTravelPlans();
+  });
+}
+
+async function togglePacked(id, index, checked) {
+  const plan = travelPlans.find((item) => item.id === id);
+  if (!plan?.packing_items[index]) return;
+  plan.packing_items[index].packed = checked;
+  const { ok, data } = await fetchJSON(API.travelPacking(id), { method: 'PUT', body: JSON.stringify({ items: plan.packing_items }) });
+  if (!ok) {
+    plan.packing_items[index].packed = !checked;  // 回滚乐观更新
+    toast(detailMsg(data, '更新失败'), 'error');
+  }
+  loadTravelPlans();  // 成功/失败都重新拉取，以服务端为准，避免缓存与库长期不一致
 }
 
 // ============ 日用品 Tab ============

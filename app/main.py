@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.database import init_db
 from app.database import get_db
-from app.modules import ai_workbench, auth, items, notify, setup, todos, users
+from app.modules import ai_workbench, auth, items, notify, setup, todos, travel, users
 
 
 @asynccontextmanager
@@ -25,6 +25,7 @@ app.include_router(ai_workbench.router, prefix="/api")
 app.include_router(notify.router, prefix="/api")
 app.include_router(todos.router, prefix="/api")
 app.include_router(setup.router, prefix="/api")
+app.include_router(travel.router, prefix="/api")
 
 _PUBLIC_API_PATHS = {
     "/api/auth/bootstrap-status",

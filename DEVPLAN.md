@@ -1226,6 +1226,24 @@ Content-Type: application/json
 
 ---
 
+## 待办 11：旅游计划与 AI 行李推荐 — **已完成**
+
+**完成情况（2026-07-19）：** 新增 `travel_plans` 表、`app/modules/travel.py` 与「旅游计划」Tab。用户可保存目的地、起止日期、人数、活动和备注；复用系统 OpenAI-compatible LLM 配置生成结构化行李清单。配置 Brave Search 时先检索目的地及行期的天气资料，未配置时返回结果明确标注为季节常识估算。清单支持勾选、增删及修改名称、数量、分类、备注并持久化。
+
+**加固（2026-07-19）：** `recommend` 复用 `ai_workbench._chat_completion`（自带 5xx/超时重试与 `response_format=json_object` 兜底）、按物品名保留用户已勾选的 `packed` 状态、单项格式异常跳过而非整张丢弃；Brave 返回非 JSON（验证码/HTML 200）时降级而非冒泡 500；`weather_summary` 为 `null` 不再显示成字面量 `None`；透传 `_response_json` 的「Base URL 像网页地址」等精确提示。`update_plan` 改期后清空旧天气避免误导、先查存在再校验日期（404 优先）；目的地纯空白在服务端拒绝。前端：勾选失败回滚并以服务端为准重载、重新生成前确认、422 错误可读化（`detailMsg`）、`structuredClone` 改为展开拷贝、日期默认用本地时区、弹窗打开时不拦截滑动切 Tab、补显备注、加载失败保留新建入口；修复引用未定义 CSS 变量（`--border`/`--bg` → `--line`）与 `.modal-wide` 被 `.modal-content` 的 `max-width` 压失效的问题。
+
+**验收：**
+
+1. 行程 CRUD 与日期边界返回中文错误；最长 90 天、人数 1–30。
+2. 无 LLM 配置时优雅返回中文错误，服务仍可启动，手动清单仍可使用。
+3. 联网天气可用时标注 `Brave 网络搜索 + LLM`；不可用时不得伪装成实时天气。
+4. LLM 仅返回并写入行李 JSON，不执行 SQL；服务端校验最多 35 条 AI 推荐、100 条用户清单。
+5. `python -m app.modules.travel` 自检通过；原有模块自检不回归。
+
+**明确不做：** 地图/路线、酒店机票预订、自动定时刷新天气、天气预警推送、医疗诊断、多人实时协作。
+
+---
+
 ## 待办 5：README / AGENTS 状态同步
 
 每次完成上面任一待办，同步更新：
