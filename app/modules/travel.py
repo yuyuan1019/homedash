@@ -155,20 +155,22 @@ async def recommend(plan_id: int, db=Depends(get_db)):
         "你是严谨的中文旅行行李助手。根据行程和天气资料生成行李建议。"
         "只输出一个 JSON 对象，不要 Markdown："
         '{"weather_summary":"简短天气说明及不确定性","items":[{"name":"物品","category":"证件|衣物|洗护|电子|药品|户外|其他","quantity":"数量","note":"携带理由","packed":false}]}。'
-        "最多 35 项；避免推荐危险品；药品只给常规提醒，不作诊断；数量要结合天数和人数。"
+        "最多 20 项；避免推荐危险品；药品只给常规提醒，不作诊断；数量要结合天数和人数。"
     )
     user = json.dumps({
         "目的地": plan["destination"], "开始日期": plan["start_date"], "结束日期": plan["end_date"],
         "人数": plan["travelers"], "活动": plan["activities"], "备注": plan["notes"], "天气资料": weather_context,
     }, ensure_ascii=False)
     try:
-        # 复用 ai_workbench._chat_completion：自带 5xx/超时重试与 response_format=json_object 兜底
-        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        # 推理模型（如 qwen3.7-plus）生成行李清单约需 50–60s：超时放宽到至少 90s；
+        # 且这类模型在长输出下用 response_format=json_object 会触发上游 500，
+        # 故 json_mode=False（prompt 已要求只输出 JSON，_loads_json_object 容错解析）。
+        async with httpx.AsyncClient(timeout=max(timeout_sec, 90)) as client:
             response = await _chat_completion(client, base_url, api_key, {
                 "model": model,
                 "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": user}],
                 "temperature": 0.2,
-            })
+            }, json_mode=False)
         if response.status_code >= 400:
             raise HTTPException(502, _llm_error_message(response.status_code))
         data = _loads_json_object(_response_json(response)["choices"][0]["message"]["content"])
