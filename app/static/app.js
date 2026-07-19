@@ -1503,7 +1503,20 @@ function renderAiWorkbench() {
 }
 
 function renderAuditRow(r) {
-  const stageLabel = r.stage === 'parse' ? '解析' : r.stage === 'chat' ? '对话' : '执行';
+  // 根据阶段和是否有操作判断标签
+  let stageLabel = '';
+  if (r.stage === 'parse') {
+    stageLabel = '解析';
+  } else if (r.stage === 'apply') {
+    stageLabel = '执行';
+  } else if (r.stage === 'chat') {
+    // chat阶段如果有actions，显示为"执行"，否则显示为"对话"
+    const hasActions = r.actions_json && r.actions_json !== '[]';
+    stageLabel = hasActions ? '执行' : '对话';
+  } else {
+    stageLabel = '其他';
+  }
+
   const okBadge = r.ok
     ? '<span class="badge badge-ok">成功</span>'
     : '<span class="badge badge-danger">失败</span>';
@@ -1558,7 +1571,7 @@ function renderAuditRow(r) {
     detailsHtml += `<div class="audit-detail-meta">模型: ${model || '—'} · 耗时: ${dur || '—'}</div>`;
   }
 
-  const revertBtn = (r.stage === 'apply' && r.ok && !r.reverted)
+  const revertBtn = ((r.stage === 'apply' || r.stage === 'chat') && r.ok && !r.reverted && r.actions_json && r.actions_json !== '[]')
     ? `<button class="btn btn-small audit-revert-btn" data-revert="${r.id}">撤回</button>` : '';
 
   return `

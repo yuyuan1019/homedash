@@ -725,7 +725,7 @@ async def revert(action_id: int, db=Depends(get_db)):
     if not _enabled():
         raise HTTPException(503, "AI 工作台未开启")
     cur = await db.execute(
-        "SELECT * FROM ai_audit WHERE id=? AND ok=1 AND (reverted=0 OR reverted IS NULL) AND (stage='apply' OR stage IS NULL)",
+        "SELECT * FROM ai_audit WHERE id=? AND ok=1 AND (reverted=0 OR reverted IS NULL) AND (stage='apply' OR stage='chat')",
         (action_id,),
     )
     row = await cur.fetchone()
