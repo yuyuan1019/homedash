@@ -140,20 +140,30 @@ header h1 {
 }
 
 /* 旅游计划 */
-.travel-list { display: grid; gap: 1rem; }
-.travel-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1rem; box-shadow: var(--shadow); }
-.travel-card-head, .packing-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
-.travel-card h3 { margin: 0 0 .3rem; }
-.travel-actions { display: flex; gap: .4rem; }
-.travel-notes { margin: .35rem 0 .1rem; font-size: .88rem; }
-.weather-summary { margin: .8rem 0; padding: .75rem; border-radius: 10px; background: var(--line); line-height: 1.55; }
+.travel-list { display: grid; gap: 1.25rem; }
+.travel-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.3rem 1.35rem; box-shadow: var(--shadow); }
+.travel-card-head, .packing-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.travel-card h3 { margin: 0 0 .45rem; }
+.travel-actions { display: flex; gap: .5rem; }
+.travel-notes { margin: .6rem 0 .15rem; font-size: .88rem; }
+.weather-summary { margin: 1rem 0; padding: .85rem 1rem; border-radius: 10px; background: var(--line); line-height: 1.6; }
 .weather-summary .badge { margin-left: .5rem; }
 .muted { color: var(--muted); }
-.packing-list { margin-top: .6rem; display: grid; gap: .35rem; }
-.packing-row { display: flex; gap: .55rem; align-items: flex-start; padding: .5rem; border-radius: 8px; background: var(--line); cursor: pointer; }
+/* 行李清单两个操作按钮之间留均匀间距，窄屏自动换行 */
+.packing-head > div { display: flex; gap: .5rem; flex-wrap: wrap; }
+.packing-list { margin-top: .85rem; display: grid; gap: .55rem; }
+.packing-row { display: flex; gap: .7rem; align-items: flex-start; padding: .65rem .75rem; border-radius: 8px; background: var(--line); cursor: pointer; }
 .packing-row small { color: var(--muted); }
 .packing-row.packed span { opacity: .55; text-decoration: line-through; }
-.packing-edit-row { display: grid; grid-template-columns: 1.2fr .5fr .7fr 1.4fr auto; gap: .4rem; margin-bottom: .5rem; }
+.packing-edit-row { display: grid; grid-template-columns: 1.2fr .5fr .7fr 1.4fr auto; gap: .5rem; margin-bottom: .55rem; align-items: center; }
+/* 行李编辑器常用物品快捷按钮 */
+.packing-quick-title { font-size: .85rem; color: var(--muted); margin: .9rem 0 .45rem; }
+.packing-quick { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .8rem; }
+.packing-quick-group { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.packing-quick-label { font-size: .76rem; color: var(--muted); width: 2.5rem; flex-shrink: 0; }
+.packing-chip { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: .3rem .75rem; font-size: .85rem; cursor: pointer; color: var(--text); }
+.packing-chip:hover { border-color: var(--accent); color: var(--accent); }
+.packing-chip.added { opacity: .4; cursor: default; }
 /* 复合选择器提高优先级，覆盖 .modal-content 的 max-width，让编辑清单在桌面端真正变宽 */
 .modal-content.modal-wide { max-width: min(900px, 94vw); }
 @media (max-width: 700px) {
@@ -293,6 +303,14 @@ main {
 
 .item-info { flex: 1 1 auto; min-width: 140px; }
 .item-name { font-weight: 600; }
+/* 物品列表卡片上的「有照片」标记：不渲染缩略图，保持列表轻量 */
+.item-photo-marker { font-size: 0.85rem; margin-left: 0.25rem; opacity: 0.7; pointer-events: none; }
+/* 收纳候选勾选列表 */
+.placement-candidate-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: .35rem; }
+.placement-candidate { display: flex; align-items: center; gap: .5rem; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; flex-wrap: wrap; }
+.placement-candidate:hover { background: var(--bg); }
+.placement-candidate input { margin: 0; }
+.placement-candidate-main { display: inline-flex; align-items: center; gap: .35rem; flex-wrap: wrap; }
 .item-meta { font-size: 0.8rem; color: var(--muted); margin-top: 0.15rem; }
 .item-tags {
   display: flex;

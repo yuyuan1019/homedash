@@ -15,6 +15,15 @@ const API = {
   itemPurchase: (id) => `/api/items/${id}/purchase`,
   itemHistory: (id) => `/api/items/${id}/history`,
   predictions: '/api/items/predictions',
+  itemFacets: '/api/items/facets',
+  itemImages: (id) => `/api/items/${id}/images`,
+  itemImage: (id, imgId) => `/api/items/${id}/images/${encodeURIComponent(imgId)}`,
+  placements: '/api/placements',
+  placement: (id) => `/api/placements/${id}`,
+  placementSuggest: (id) => `/api/placements/${id}/suggest`,
+  placementConfirm: (id) => `/api/placements/${id}/confirm`,
+  placementImages: (id) => `/api/placements/${id}/images`,
+  placementImage: (id, imgId) => `/api/placements/${id}/images/${encodeURIComponent(imgId)}`,
   todos: (status = 'open') => `/api/todos?status=${status}`,
   todo: (id) => `/api/todos/${id}`,
   todoDone: (id) => `/api/todos/${id}/done`,
@@ -49,6 +58,7 @@ let todoStatus = 'open';
 let chatMessages = [];
 let setupStatusData = null;
 let itemCategoryTimer = null;
+let itemFacetsCache = null;
 let currentUser = null;
 
 // ============ 工具函数 ============
@@ -291,22 +301,75 @@ async function handleTravelAction(action, id) {
   }
   if (action === 'recommend') {
     if ((plan.packing_items || []).length && !confirm('重新生成会替换当前清单，已勾选的物品将按名称保留勾选状态。确定继续吗？')) return;
-    toast('正在查询天气并生成行李建议...');
-    const { ok, data } = await fetchJSON(API.travelRecommend(id), { method: 'POST' });
-    if (!ok) return toast(detailMsg(data, '生成失败'), 'error');
-    toast('行李建议已生成，可继续修改', 'success'); return loadTravelPlans();
+    // 推理模型生成约需 1 分钟：按钮显示已用秒数，避免干等无感
+    const btn = document.querySelector(`[data-travel-action="recommend"][data-id="${id}"]`);
+    const originalText = btn?.textContent;
+    const startedAt = Date.now();
+    let ticker = null;
+    if (btn) {
+      btn.disabled = true;
+      const tick = () => { btn.textContent = `⏳ 生成中… ${Math.floor((Date.now() - startedAt) / 1000)}s（约 1 分钟）`; };
+      tick();
+      ticker = setInterval(tick, 1000);
+    }
+    toast('正在查询天气并生成行李建议，约需 1 分钟…');
+    try {
+      const { ok, data } = await fetchJSON(API.travelRecommend(id), { method: 'POST' });
+      if (!ok) return toast(detailMsg(data, '生成失败'), 'error');
+      toast('行李建议已生成，可继续修改', 'success');
+      return loadTravelPlans();
+    } catch {
+      toast('生成失败，请检查网络后重试', 'error');
+    } finally {
+      if (ticker) clearInterval(ticker);
+      if (btn) { btn.disabled = false; btn.textContent = originalText; }
+    }
   }
 }
 
+// 行李常用物品快捷添加（按分类分组），点击即加入清单
+const PACKING_QUICK_ADD = [
+  { category: '证件', items: ['身份证', '护照', '银行卡', '医保卡'] },
+  { category: '衣物', items: ['内衣', '内裤', '袜子', '睡衣', 'T恤', '外套', '裤子'] },
+  { category: '洗护', items: ['牙刷', '牙膏', '毛巾', '洗发水', '沐浴露', '防晒霜'] },
+  { category: '电子', items: ['充电宝', '充电器', '数据线', '耳机'] },
+  { category: '药品', items: ['常备药', '创可贴', '晕车药'] },
+  { category: '其他', items: ['耳塞', '眼罩', '雨伞', '纸巾', '水杯'] },
+];
+
 function showPackingEditor(plan) {
   const items = (plan.packing_items || []).map((item) => ({ ...item }));
+  const hasName = (name) => items.some((it) => it.name.trim() === name);
+  const quickAddHtml = `<div class="packing-quick">${PACKING_QUICK_ADD.map((group) =>
+    `<div class="packing-quick-group"><span class="packing-quick-label">${esc(group.category)}</span>${group.items.map((name) =>
+      `<button type="button" class="packing-chip" data-name="${esc(name)}" data-category="${esc(group.category)}">${esc(name)}</button>`).join('')}</div>`).join('')}</div>`;
   const renderRows = () => {
-    document.getElementById('packing-edit-list').innerHTML = items.map((item, index) => `<div class="packing-edit-row"><input data-field="name" data-index="${index}" value="${esc(item.name)}" placeholder="物品"><input data-field="quantity" data-index="${index}" value="${esc(item.quantity)}" placeholder="数量"><input data-field="category" data-index="${index}" value="${esc(item.category)}" placeholder="分类"><input data-field="note" data-index="${index}" value="${esc(item.note || '')}" placeholder="备注"><button type="button" class="btn btn-small btn-danger packing-remove" data-index="${index}">删除</button></div>`).join('');
+    document.getElementById('packing-edit-list').innerHTML = items.length ? items.map((item, index) => `<div class="packing-edit-row">
+        <input class="pe-name" data-field="name" data-index="${index}" value="${esc(item.name)}" placeholder="物品名称">
+        <input class="pe-qty" data-field="quantity" data-index="${index}" value="${esc(item.quantity)}" placeholder="数量">
+        <input class="pe-cat" data-field="category" data-index="${index}" value="${esc(item.category)}" placeholder="分类">
+        <input class="pe-note" data-field="note" data-index="${index}" value="${esc(item.note || '')}" placeholder="备注">
+        <button type="button" class="btn btn-small btn-danger packing-remove" data-index="${index}">删除</button>
+      </div>`).join('') : '<div class="empty" style="padding:.6rem 0;">还没有物品，点上方常用物品或「＋ 手动添加一项」</div>';
+    // 已加入清单的快捷项置灰，防重复
+    document.querySelectorAll('.packing-chip').forEach((chip) => chip.classList.toggle('added', hasName(chip.dataset.name)));
     document.querySelectorAll('#packing-edit-list input').forEach((input) => input.addEventListener('input', () => { items[Number(input.dataset.index)][input.dataset.field] = input.value; }));
     document.querySelectorAll('.packing-remove').forEach((btn) => btn.addEventListener('click', () => { items.splice(Number(btn.dataset.index), 1); renderRows(); }));
   };
-  showModal(`<div class="modal-content modal-wide"><button class="close-btn">×</button><h2>编辑 ${esc(plan.destination)} 行李清单</h2><div id="packing-edit-list"></div><button type="button" class="btn" id="packing-add">＋ 添加一项</button><div class="modal-actions"><button type="button" class="btn modal-cancel">取消</button><button class="btn btn-primary" id="packing-save">保存清单</button></div></div>`);
+  showModal(`<div class="modal-content modal-wide"><button class="close-btn">×</button><h2>编辑 ${esc(plan.destination)} 行李清单</h2>
+    <div class="packing-quick-title">常用物品（点一下加入清单）</div>
+    ${quickAddHtml}
+    <div id="packing-edit-list"></div>
+    <button type="button" class="btn" id="packing-add">＋ 手动添加一项</button>
+    <div class="modal-actions"><button type="button" class="btn modal-cancel">取消</button><button class="btn btn-primary" id="packing-save">保存清单</button></div>
+  </div>`);
   bindModalClose(); renderRows();
+  document.querySelectorAll('.packing-chip').forEach((chip) => chip.addEventListener('click', () => {
+    const name = chip.dataset.name;
+    if (hasName(name)) { toast(`「${name}」已在清单中`, 'info'); return; }
+    items.push({ name, quantity: '1', category: chip.dataset.category, note: '', packed: false });
+    renderRows();
+  }));
   document.getElementById('packing-add').addEventListener('click', () => { items.push({ name: '', quantity: '1', category: '其他', note: '', packed: false }); renderRows(); });
   document.getElementById('packing-save').addEventListener('click', async () => {
     const clean = items.filter((item) => item.name.trim()).map((item) => ({ ...item, name: item.name.trim(), quantity: item.quantity || '1', category: item.category || '其他' }));
@@ -332,7 +395,12 @@ async function togglePacked(id, index, checked) {
 
 function getBadge(item) {
   const pred = item.prediction || {};
-  if (pred.need_buy) return '<span class="badge badge-danger">紧急</span>';
+  // 「紧急」只在库存到/低于用户设的最低库存时出现；库存高于最低值时不再标红，
+  // 即便按消耗速率预测短期内会用完，也只显示「偏低」而非「紧急」。
+  if (Number(item.current_stock) <= Number(item.min_stock || 0)) {
+    return '<span class="badge badge-danger">紧急</span>';
+  }
+  if (pred.need_buy) return '<span class="badge badge-warn">偏低</span>';
   const days = pred.days_until_empty;
   if (days !== null && days < 14) return '<span class="badge badge-warn">偏低</span>';
   return '<span class="badge badge-ok">充足</span>';
@@ -348,7 +416,7 @@ function renderItemCard(item) {
   return `
     <div class="item-card" data-id="${item.id}">
       <div class="item-info">
-        <div class="item-name">${esc(item.name)} ${getBadge(item)}</div>
+        <div class="item-name">${esc(item.name)} ${item.has_images ? '<span class="item-photo-marker" title="有照片">📷</span>' : ''} ${getBadge(item)}</div>
         <div class="item-meta">${esc(item.category || '未分类')} · 剩余 ${fmtNumber(item.current_stock)} ${esc(item.unit || '个')}${place}${expiry}</div>
       </div>
       <div class="item-tags">
@@ -367,6 +435,7 @@ function renderItems(items) {
     <div class="toolbar">
       <button class="btn btn-primary" id="add-item-btn">+ 添加物品</button>
       <button class="btn" id="shopping-list-btn">📋 购物清单</button>
+      <button class="btn" id="log-placement-btn">📍 记录收纳</button>
     </div>`;
 
   if (!items.length) {
@@ -402,6 +471,7 @@ function renderItems(items) {
 function bindItemToolbar() {
   document.getElementById('add-item-btn')?.addEventListener('click', () => showItemForm());
   document.getElementById('shopping-list-btn')?.addEventListener('click', showShoppingList);
+  document.getElementById('log-placement-btn')?.addEventListener('click', () => showPlacementForm());
 }
 
 async function loadItems() {
@@ -417,8 +487,142 @@ async function loadItems() {
 
 // ============ 日用品 Modal ============
 
-function showItemForm(item = null) {
+async function loadItemFacets() {
+  if (itemFacetsCache) return itemFacetsCache;
+  const { ok, data } = await fetchJSON(API.itemFacets);
+  if (!ok || !data) return { categories: [], units: [], locations: [], defaults: { categories: [], units: [] } };
+  itemFacetsCache = data;
+  return data;
+}
+
+// 服务端频次降序值在前、默认值补后，去重合并成 datalist 候选
+function mergeFacetOptions(serverValues, defaults) {
+  const seen = new Set();
+  const out = [];
+  for (const v of [...(serverValues || []), ...(defaults || [])]) {
+    const name = String(v || '').trim();
+    if (name && !seen.has(name)) { seen.add(name); out.push(name); }
+  }
+  return out;
+}
+
+// ============ 物品图片（与待办图片同构，复用 showImagePreview 放大浏览器与 pendingImageUrls） ============
+
+function itemImageUrl(itemId, imageId) { return API.itemImage(itemId, imageId); }
+
+function renderItemImages(item) {
+  if (!item?.images?.length) return '';
+  return `<div class="todo-image-grid">${item.images.map((image) => `
+    <div class="todo-image-thumb">
+      <img src="${itemImageUrl(item.id, image.id)}" alt="物品图片">
+      <button class="todo-image-remove" type="button" data-image-id="${image.id}" title="移除图片">&times;</button>
+    </div>`).join('')}</div>`;
+}
+
+function currentExistingItemImageCount() {
+  return document.querySelectorAll('#item-existing-images .todo-image-thumb').length;
+}
+
+function renderPendingItemImages() {
+  const input = document.getElementById('item-images');
+  const container = document.getElementById('item-pending-images');
+  if (!input || !container) return;
+  for (const url of pendingImageUrls) URL.revokeObjectURL(url);
+  pendingImageUrls.clear();
+  container.innerHTML = [...input.files].map((file) => {
+    const url = URL.createObjectURL(file);
+    pendingImageUrls.add(url);
+    return `    <div class="todo-image-thumb"><img src="${url}" alt="待上传图片" title="${esc(file.name)}"></div>`;
+  }).join('');
+}
+
+function setItemImageFiles(files) {
+  const input = document.getElementById('item-images');
+  const valid = files.filter(isSupportedTodoImage);
+  if (!input || !valid.length) return 0;
+  const capacity = 5 - currentExistingItemImageCount();
+  if (capacity <= 0) { toast('每个物品最多 5 张图片', 'error'); return 0; }
+  const added = valid.slice(0, capacity);
+  const transfer = new DataTransfer();
+  added.forEach((file) => transfer.items.add(file));
+  input.files = transfer.files;
+  renderPendingItemImages();
+  if (valid.length > added.length) toast('图片数量已达到 5 张上限', 'error');
+  return added.length;
+}
+
+function addItemImageFiles(files) {
+  const input = document.getElementById('item-images');
+  const before = input?.files.length || 0;
+  setItemImageFiles([...(input?.files || []), ...files]);
+  return Math.max(0, (input?.files.length || 0) - before);
+}
+
+function bindItemImageRemoveButtons(itemId) {
+  document.querySelectorAll('#item-existing-images .todo-image-remove').forEach((button) => {
+    button.addEventListener('click', () => deleteItemImage(itemId, button.dataset.imageId));
+  });
+}
+
+async function uploadOneItemImage(itemId, file, signal) {
+  if (file.size > 10 * 1024 * 1024) return `${file.name} 超过 10MB`;
+  const form = new FormData();
+  form.append('image', file);
+  let response;
+  try {
+    response = await fetch(API.itemImages(itemId), { method: 'POST', body: form, signal });
+  } catch (error) {
+    if (error?.name === 'AbortError') return `${file.name} 已取消`;
+    return `${file.name} 网络错误`;
+  }
+  const data = await response.json().catch(() => null);
+  if (!response.ok) return data?.detail || `${file.name} 上传失败`;
+  return null;
+}
+
+async function uploadItemImages(formState) {
+  const input = document.getElementById('item-images');
+  if (!input || !input.files.length) return;
+  const failed = [];
+  for (const file of [...input.files]) {
+    const reason = await uploadOneItemImage(formState.id, file, formState.abort?.signal);
+    if (reason) failed.push({ file, reason });
+  }
+  if (formState.abort?.signal?.aborted) return;
+  const transfer = new DataTransfer();
+  failed.forEach((it) => transfer.items.add(it.file));
+  input.files = transfer.files;
+  renderPendingItemImages();
+  if (failed.length) {
+    const first = failed[0].reason;
+    throw new Error(failed.length === 1 ? first : `${failed.length} 张图片上传失败（${first}）`);
+  }
+}
+
+async function refreshExistingItemImages(itemId) {
+  const { ok, data } = await fetchJSON(API.item(itemId));
+  if (!ok) return;
+  const container = document.getElementById('item-existing-images');
+  if (container) { container.innerHTML = renderItemImages(data); bindItemImageRemoveButtons(itemId); }
+}
+
+async function deleteItemImage(itemId, imageId) {
+  const { ok, data } = await fetchJSON(itemImageUrl(itemId, imageId), { method: 'DELETE' });
+  if (!ok) { toast(data?.detail || '删除失败', 'error'); return; }
+  toast('图片已删除', 'success');
+  const container = document.getElementById('item-existing-images');
+  if (container) { container.innerHTML = renderItemImages(data); bindItemImageRemoveButtons(itemId); }
+}
+
+async function showItemForm(item = null) {
   const isEdit = !!item;
+  const formState = { id: item?.id, abort: new AbortController() };
+  pendingImageUrls.forEach((url) => URL.revokeObjectURL(url)); pendingImageUrls.clear();
+  const facets = await loadItemFacets();
+  const categoryOpts = mergeFacetOptions(facets.categories, facets.defaults.categories);
+  const unitOpts = mergeFacetOptions(facets.units, facets.defaults.units);
+  const locationOpts = facets.locations || [];  // 存放地点为用户私有，无冷启动默认
+  const datalist = (id, opts) => `<datalist id="${id}">${opts.map((o) => `<option value="${esc(o)}">`).join('')}</datalist>`;
   showModal(`
     <div class="modal-content">
       <div class="modal-header">
@@ -432,11 +636,12 @@ function showItemForm(item = null) {
       <div class="form-group">
         <label>分类</label>
         <input id="item-category" list="item-category-list" value="${item?.category || ''}">
-        <datalist id="item-category-list"><option value="纸品"><option value="洗护"><option value="清洁"><option value="厨房"><option value="宠物"><option value="冷冻"><option value="药品"><option value="其他"></datalist>
+        ${datalist('item-category-list', categoryOpts)}
       </div>
       <div class="form-group">
         <label>单位</label>
-        <input id="item-unit" value="${item?.unit || '个'}">
+        <input id="item-unit" list="item-unit-list" value="${item?.unit || '个'}">
+        ${datalist('item-unit-list', unitOpts)}
       </div>
       <div class="form-group">
         <label>当前库存</label>
@@ -448,11 +653,18 @@ function showItemForm(item = null) {
       </div>
       <div class="form-group">
         <label>存放地点</label>
-        <input id="item-location" placeholder="如：卫生间 / 厨房柜 / 储物间" value="${item?.location || ''}">
+        <input id="item-location" list="item-location-list" placeholder="如：卫生间 / 厨房柜 / 储物间" value="${item?.location || ''}">
+        ${datalist('item-location-list', locationOpts)}
       </div>
       <div class="form-group">
         <label>到期年月</label>
         <input type="month" id="item-expires" value="${item?.expires_at || ''}">
+      </div>
+      <div class="form-group">
+        <label>图片（最多 5 张，每张不超过 10MB，可直接粘贴）</label>
+        <div id="item-existing-images">${renderItemImages(item)}</div>
+        <div id="item-pending-images" class="todo-image-grid"></div>
+        <input type="file" id="item-images" accept="image/jpeg,image/png,image/gif,image/webp" multiple>
       </div>
       <div class="form-actions">
         <button class="btn modal-cancel">取消</button>
@@ -460,8 +672,17 @@ function showItemForm(item = null) {
       </div>
     </div>`);
   bindModalClose();
-  document.getElementById('save-item').addEventListener('click', () => saveItem(item?.id));
+  // 关闭/取消时中止进行中的图片上传；保存成功后由 saveItem 上传所选图片
+  document.querySelectorAll('.close-btn, .modal-cancel').forEach((btn) => btn.addEventListener('click', () => formState.abort.abort()));
+  document.getElementById('save-item').addEventListener('click', () => saveItem(formState));
   if (!isEdit) document.getElementById('item-name').addEventListener('blur', suggestItemCategory);
+  bindItemImageRemoveButtons(formState.id);
+  const itemImageInput = document.getElementById('item-images');
+  itemImageInput.addEventListener('change', () => setItemImageFiles([...itemImageInput.files]));
+  itemImageInput.closest('.modal-content').addEventListener('paste', (event) => {
+    const added = addItemImageFiles([...(event.clipboardData?.files || [])]);
+    if (added) { event.preventDefault(); toast(`已粘贴 ${added} 张图片，保存后上传`, 'success'); }
+  });
 }
 
 async function suggestItemCategory() {
@@ -475,7 +696,7 @@ async function suggestItemCategory() {
   }, 200);
 }
 
-async function saveItem(id) {
+async function saveItem(formState) {
   const payload = {
     name: document.getElementById('item-name').value.trim(),
     category: document.getElementById('item-category').value.trim() || null,
@@ -486,17 +707,30 @@ async function saveItem(id) {
     expires_at: document.getElementById('item-expires').value || null,
   };
   if (!payload.name) { toast('名称必填', 'error'); return; }
-  const { ok, data } = await fetchJSON(id ? API.item(id) : API.items, {
-    method: id ? 'PUT' : 'POST',
-    body: JSON.stringify(payload),
-  });
-  if (ok) {
-    toast(id ? '保存成功' : '添加成功', 'success');
-    closeModal();
-    loadItems();
+  const wasNew = !formState.id;
+  if (wasNew) {
+    const { ok, data } = await fetchJSON(API.items, { method: 'POST', body: JSON.stringify(payload) });
+    if (!ok) { toast(data?.detail || '保存失败', 'error'); return; }
+    formState.id = data.id;
+    const saveBtn = document.getElementById('save-item'); if (saveBtn) saveBtn.textContent = '保存';
   } else {
-    toast(data?.detail || '操作失败', 'error');
+    const { ok } = await fetchJSON(API.item(formState.id), { method: 'PUT', body: JSON.stringify(payload) });
+    if (!ok) { toast('保存失败', 'error'); return; }
   }
+  let uploadError = null;
+  try { await uploadItemImages(formState); } catch (error) { uploadError = error.message; }
+  if (uploadError) {
+    // 物品已落库：刷新已存在图片区，提示仅图片失败可重试，避免误判整体失败重填导致重复
+    await refreshExistingItemImages(formState.id);
+    toast(`${wasNew ? '物品已创建' : '物品已保存'}，但 ${uploadError}（可再次点保存重试）`, 'error');
+    itemFacetsCache = null;
+    loadItems();
+    return;
+  }
+  toast(wasNew ? '添加成功' : '保存成功', 'success');
+  itemFacetsCache = null;
+  closeModal();
+  loadItems();
 }
 
 async function showItemDetail(id) {
@@ -529,6 +763,7 @@ async function showItemDetail(id) {
       <div style="margin-bottom:1rem;color:var(--muted);font-size:0.9rem;">
         ${esc(item.category || '未分类')} · 剩余 ${fmtNumber(item.current_stock)} ${esc(item.unit || '个')} · 预计 ${daysText}${place}${expiry}
       </div>
+      ${item.images?.length ? `<div class="todo-image-strip" style="margin-bottom:0.8rem;">${item.images.map((image, index) => `<img src="${itemImageUrl(item.id, image.id)}" alt="物品图片" class="todo-image-preview" data-src="${itemImageUrl(item.id, image.id)}" data-index="${index}">`).join('')}</div>` : ''}
       <div class="toolbar" style="margin-bottom:0.8rem;">
         <button class="btn" id="log-usage-btn">记录消耗</button>
         <button class="btn" id="log-purchase-btn">记录购买</button>
@@ -543,6 +778,14 @@ async function showItemDetail(id) {
   document.getElementById('log-purchase-btn').addEventListener('click', () => showLogForm(id, 'purchase'));
   document.getElementById('edit-item-btn').addEventListener('click', () => showItemForm(item));
   document.getElementById('delete-item-btn').addEventListener('click', () => deleteItem(id));
+  // 物品图片点击放大，支持左右切换（复用 showImagePreview）
+  document.querySelectorAll('#modal .todo-image-preview').forEach((img) => {
+    img.addEventListener('click', () => {
+      const urls = (item.images || []).map((image) => itemImageUrl(item.id, image.id));
+      const idx = Number(img.dataset.index);
+      showImagePreview(urls[idx], urls, idx);
+    });
+  });
 }
 
 function showLogForm(id, type) {
@@ -603,6 +846,7 @@ async function deleteItem(id) {
   const { ok, data } = await fetchJSON(API.item(id), { method: 'DELETE' });
   if (ok) {
     toast('删除成功', 'success');
+    itemFacetsCache = null;
     closeModal();
     loadItems();
   } else {
@@ -632,6 +876,115 @@ async function showShoppingList() {
   bindModalClose();
   document.getElementById('copy-list').addEventListener('click', () => {
     navigator.clipboard.writeText(listText).then(() => toast('已复制到剪贴板', 'success'));
+  });
+}
+
+// ============ 收纳知识库（placements） ============
+
+function placementImageUrl(pid, imageId) { return API.placementImage(pid, imageId); }
+
+function showPlacementForm(placement = null) {
+  pendingImageUrls.forEach((url) => URL.revokeObjectURL(url)); pendingImageUrls.clear();
+  showModal(`
+    <div class="modal-content">
+      <div class="modal-header"><div class="modal-title">${placement ? '编辑收纳记录' : '📍 记录收纳'}</div><button class="close-btn">&times;</button></div>
+      <div class="form-group"><label>放了什么 / 描述 *</label><textarea id="placement-desc" placeholder="例如：把猫粮备用装塞到了阳台储物柜上层">${esc(placement?.description || '')}</textarea></div>
+      <div class="form-group"><label>位置（可选）</label><input id="placement-location" value="${esc(placement?.location || '')}" placeholder="例如：阳台储物柜上层"></div>
+      <div class="form-group"><label>备注（可选）</label><input id="placement-note" value="${esc(placement?.note || '')}"></div>
+      <div class="form-group"><label>照片（可选，最多 5 张，每张不超过 10MB）</label><input type="file" id="placement-images" accept="image/jpeg,image/png,image/gif,image/webp" multiple></div>
+      <div class="form-actions"><button class="btn modal-cancel">取消</button><button class="btn btn-primary" id="placement-save">保存并关联物品</button></div>
+    </div>`);
+  bindModalClose();
+  document.getElementById('placement-save').addEventListener('click', () => savePlacement());
+}
+
+async function savePlacement() {
+  const description = document.getElementById('placement-desc').value.trim();
+  if (!description) { toast('描述必填', 'error'); return; }
+  const payload = {
+    description,
+    location: document.getElementById('placement-location').value.trim() || null,
+    note: document.getElementById('placement-note').value.trim() || null,
+  };
+  const btn = document.getElementById('placement-save');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  const { ok, data } = await fetchJSON(API.placements, { method: 'POST', body: JSON.stringify(payload) });
+  if (!ok) { if (btn) { btn.disabled = false; btn.textContent = '保存并关联物品'; } toast(detailMsg(data, '保存失败'), 'error'); return; }
+  const pid = data.id;
+  // 上传所选图片：单张失败不阻断（收纳记录已建）
+  const files = [...(document.getElementById('placement-images')?.files || [])].filter(isSupportedTodoImage).slice(0, 5);
+  for (const file of files) {
+    if (file.size > 10 * 1024 * 1024) { toast(`${file.name} 超过 10MB，已跳过`, 'error'); continue; }
+    const form = new FormData(); form.append('image', file);
+    try { await fetch(API.placementImages(pid), { method: 'POST', body: form }); } catch { /* 单张失败继续 */ }
+  }
+  // 调 LLM 给候选；推理模型较慢，按钮显示已用秒数；未配置/失败则降级为空候选，用户手动勾选
+  let placement = data;
+  const suggestStartedAt = Date.now();
+  let ticker = null;
+  if (btn) {
+    const tick = () => { btn.textContent = `AI 关联中… ${Math.floor((Date.now() - suggestStartedAt) / 1000)}s（约 1 分钟）`; };
+    tick();
+    ticker = setInterval(tick, 1000);
+  }
+  const sg = await fetchJSON(API.placementSuggest(pid), { method: 'POST' });
+  if (ticker) clearInterval(ticker);
+  if (sg.ok) placement = sg.data;
+  else if (sg.status === 503) toast('AI 未配置，可手动选择关联物品', 'info');
+  else toast(detailMsg(sg.data, '候选生成失败，可手动选择'), 'error');
+  closeModal();
+  showPlacementCandidates(placement);
+}
+
+async function showPlacementCandidates(placement) {
+  // 全部物品与 LLM 候选合并成一个勾选列表：候选靠前、高置信度预勾选；其余物品可手动加选
+  const itemsRes = await fetchJSON(API.items);
+  const allItems = itemsRes.ok ? itemsRes.data : [];
+  const candMap = new Map();
+  for (const c of (placement.candidate_items || [])) { if (c.item_id != null) candMap.set(c.item_id, c); }
+  const ordered = [
+    ...allItems.filter((it) => candMap.has(it.id)),
+    ...allItems.filter((it) => !candMap.has(it.id)),
+  ];
+  const checked = new Set([...candMap.keys()].filter((id) => (candMap.get(id)?.confidence ?? 0) >= 0.5));
+  const renderList = () => {
+    const filter = (document.getElementById('placement-filter')?.value || '').trim().toLowerCase();
+    document.getElementById('placement-candidate-list').innerHTML = (ordered
+      .filter((it) => !filter || (it.name || '').toLowerCase().includes(filter) || (it.category || '').toLowerCase().includes(filter))
+      .map((it) => {
+        const c = candMap.get(it.id);
+        const conf = c ? Math.round((c.confidence || 0) * 100) : null;
+        const confBadge = c ? `<span class="badge ${conf >= 66 ? 'badge-ok' : conf >= 40 ? 'badge-warn' : 'badge-outline'}">${conf}%</span>` : '';
+        const reason = c?.reason ? `<span class="muted" style="font-size:.78rem;">${esc(c.reason)}</span>` : '';
+        return `<label class="placement-candidate"><input type="checkbox" value="${it.id}" ${checked.has(it.id) ? 'checked' : ''}><span class="placement-candidate-main"><b>${esc(it.name)}</b> <span class="muted">${esc(it.category || '未分类')}</span> ${confBadge}</span>${reason}</label>`;
+      }).join('')) || '<div class="empty" style="padding:.6rem 0;">没有匹配的物品</div>';
+    document.querySelectorAll('#placement-candidate-list input[type=checkbox]').forEach((box) => {
+      box.addEventListener('change', () => { if (box.checked) checked.add(Number(box.value)); else checked.delete(Number(box.value)); });
+    });
+  };
+  const imageStrip = placement.images?.length
+    ? `<div class="todo-image-strip" style="margin-bottom:.6rem;">${placement.images.map((img) => `<img src="${placementImageUrl(placement.id, img.id)}" alt="收纳照片" class="todo-image-preview">`).join('')}</div>`
+    : '';
+  showModal(`
+    <div class="modal-content modal-wide">
+      <div class="modal-header"><div class="modal-title">确认收纳关联</div><button class="close-btn">&times;</button></div>
+      <div style="margin-bottom:.6rem;"><b>${esc(placement.description)}</b>${placement.location ? ` · <span class="muted">${esc(placement.location)}</span>` : ''}</div>
+      ${imageStrip}
+      <div class="form-group"><label>关联到哪些库存物品（勾选）</label><input id="placement-filter" placeholder="搜索物品名/分类筛选…"></div>
+      <div id="placement-candidate-list" class="placement-candidate-list"></div>
+      <div class="form-group" style="margin-top:.6rem;"><label>位置（可修改）</label><input id="placement-confirm-location" value="${esc(placement.location || '')}"></div>
+      <div class="modal-actions"><button class="btn modal-cancel">跳过</button><button class="btn btn-primary" id="placement-confirm">确认</button></div>
+    </div>`);
+  bindModalClose();
+  renderList();
+  document.getElementById('placement-filter').addEventListener('input', renderList);
+  document.getElementById('placement-confirm').addEventListener('click', async () => {
+    const itemIds = [...checked];
+    const location = document.getElementById('placement-confirm-location').value.trim() || null;
+    const { ok, data } = await fetchJSON(API.placementConfirm(placement.id), { method: 'PUT', body: JSON.stringify({ item_ids: itemIds, location }) });
+    if (!ok) return toast(detailMsg(data, '确认失败'), 'error');
+    toast('收纳记录已确认，AI 可检索', 'success');
+    closeModal();
   });
 }
 
