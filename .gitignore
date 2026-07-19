@@ -5,12 +5,7 @@ __pycache__/
 *.pyc
 data/homedash.db
 data/todo_images/
-data/xiaomi_cloud.json
-data/ble_devices.json
-data/xiaomi_session.pkl
-data/xiaomi_login_state_*.pkl
 data/llm_config.json
 data/notify_config.json
-data/app_config.json
-config/devices.yaml
+data/brave_config.json
 .env

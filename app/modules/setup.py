@@ -1,6 +1,5 @@
-"""初始化设置：配置状态、米家设备/云端登录、LLM/SMTP 配置。"""
+"""初始化设置：配置状态、LLM/Brave/SMTP 配置。"""
 import asyncio
-import string
 import json
 import os
 import smtplib
@@ -8,44 +7,15 @@ import tempfile
 from email.utils import parseaddr
 
 import httpx
-import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-
-from app.modules import devices
 
 router = APIRouter()
 
 DATA_DIR = "data"
 LLM_CONFIG_FILE = os.path.join(DATA_DIR, "llm_config.json")
 NOTIFY_CONFIG_FILE = os.path.join(DATA_DIR, "notify_config.json")
-APP_CONFIG_FILE = os.path.join(DATA_DIR, "app_config.json")
-XIAOMI_CREDS_FILE = os.path.join(DATA_DIR, "xiaomi_cloud.json")
-BLE_DEVICES_FILE = os.path.join(DATA_DIR, "ble_devices.json")
 BRAVE_CONFIG_FILE = os.path.join(DATA_DIR, "brave_config.json")
-
-
-class DeviceIn(BaseModel):
-    name: str
-    original_name: str = ""
-    type: str = "light"
-    model: str = ""
-    host: str = ""
-    token: str = ""
-    did: str = ""
-    siid: int | None = None
-
-
-class XiaomiLoginStep1In(BaseModel):
-    username: str
-    password: str
-
-
-class XiaomiLoginStep2In(BaseModel):
-    state_id: str
-    captcha_code: str
-    username: str = ""
-    password: str = ""
 
 
 class LlmConfigIn(BaseModel):
@@ -71,16 +41,8 @@ class NotifyConfigIn(BaseModel):
     homedash_public_url: str = ""
 
 
-class AppConfigIn(BaseModel):
-    kuma_public_url: str = ""
-
-
 class BraveConfigIn(BaseModel):
     api_key: str = ""
-
-
-def _devices_yaml_path() -> str:
-    return os.getenv("DEVICES_PATH", "config/devices.yaml")
 
 
 def _mask(value: str | None, head: int = 4, tail: int = 4) -> str:
@@ -103,59 +65,6 @@ def _write_json(path: str, data: dict) -> None:
         os.chmod(path, 0o600)
     except OSError:
         pass
-
-
-def _app_file_config() -> dict:
-    if not os.path.isfile(APP_CONFIG_FILE):
-        return {}
-    try:
-        with open(APP_CONFIG_FILE) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _app_config() -> dict:
-    file_cfg = _app_file_config()
-    return {"kuma_public_url": os.getenv("KUMA_PUBLIC_URL") or file_cfg.get("kuma_public_url", "")}
-
-
-def _load_yaml() -> dict:
-    path = _devices_yaml_path()
-    if not os.path.isfile(path):
-        return {"devices": []}
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {"devices": []}
-
-
-def _save_yaml(data: dict) -> None:
-    path = _devices_yaml_path()
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, allow_unicode=True, sort_keys=False)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-
-
-def _has_xiaomi_creds_file() -> bool:
-    if not os.path.isfile(XIAOMI_CREDS_FILE):
-        return False
-    try:
-        with open(XIAOMI_CREDS_FILE) as f:
-            creds = json.load(f)
-        return bool(creds.get("user_id") and creds.get("service_token"))
-    except (json.JSONDecodeError, OSError):
-        return False
-
-
-def _has_xiaomi_env() -> bool:
-    return bool(os.getenv("XIAOMI_USERNAME") and os.getenv("XIAOMI_PASSWORD"))
-
-
-def _has_xiaomi_creds() -> bool:
-    return _has_xiaomi_creds_file() or _has_xiaomi_env()
 
 
 def _llm_env_config() -> dict | None:
@@ -362,25 +271,6 @@ async def _fetch_llm_models(cfg: dict) -> tuple[bool, str, list[str]]:
     return bool(models), "模型列表已获取" if models else "无法获取模型列表，请检查 Base URL / API Key", models
 
 
-def _test_xiaomi_cloud_sync() -> bool:
-    from micloud import MiCloud
-    if not _has_xiaomi_creds_file():
-        return False
-    try:
-        with open(XIAOMI_CREDS_FILE) as f:
-            creds = json.load(f)
-        cloud = MiCloud()
-        cloud.user_id = int(creds["user_id"])
-        cloud.service_token = creds["service_token"]
-        cloud.ssecurity = creds.get("ssecurity", "")
-        result = cloud.request_country("/home/device_list", "cn", {"data": "{\"getVirtualModel\":false,\"getHuamiDevices\":1}"})
-        if isinstance(result, dict):
-            return result.get("code", 0) == 0 or "result" in result
-        return result is not None
-    except Exception:
-        return False
-
-
 def _merge_llm_payload(payload: LlmConfigIn) -> dict:
     current = _llm_config() or {}
     api_key = payload.api_key.strip()
@@ -448,184 +338,26 @@ def _test_smtp_sync(cfg: dict) -> tuple[bool, str]:
 @router.get("/setup/status")
 async def setup_status():
     """返回本地配置完整度（不做实时外网探测，避免卡顿/烧 token）。"""
-    yaml_data = _load_yaml()
-    device_list = yaml_data.get("devices", []) or []
-    has_wifi = any(d.get("host") and d.get("token") for d in device_list)
-    has_ble = any(d.get("did") and not d.get("host") for d in device_list)
     llm_cfg = _llm_config()
     llm_configured = llm_cfg is not None
-    xiaomi_file = _has_xiaomi_creds_file()
-    xiaomi_any = _has_xiaomi_creds()
     smtp_configured = _notify_configured()
     brave_configured = _brave_configured()
     agent_token = os.getenv("AGENT_API_TOKEN", "")
 
     missing = []
-    if not device_list:
-        missing.append("未配置米家设备")
-    if device_list and not has_wifi and not has_ble:
-        missing.append("设备配置缺少 host/token 或 did")
-    if has_ble and not xiaomi_file:
-        missing.append("BLE Mesh 设备需要小米云端登录")
     if not llm_configured:
         missing.append("未配置 AI 工作台 LLM")
-    # SMTP 可选，不进 missing
+    # SMTP / Brave 可选，不进 missing
 
     return {
-        "devices_yaml_exists": os.path.isfile(_devices_yaml_path()),
-        "devices_count": len(device_list),
-        "has_wifi_devices": has_wifi,
-        "has_ble_devices": has_ble,
-        "xiaomi_cloud_creds_exists": xiaomi_any,
-        # 就绪 = 本地有可用 token 文件（非实时连通探测）
-        "xiaomi_cloud_status": xiaomi_file,
         "llm_configured": llm_configured,
         "llm_status": llm_configured,
         "llm_model": _mask(llm_cfg.get("model")) if llm_cfg else "",
         "smtp_configured": smtp_configured,
-        "kuma_public_url_configured": bool(_app_config()["kuma_public_url"]),
         "agent_token_configured": bool(agent_token),
         "brave_configured": brave_configured,
         "missing": missing,
     }
-
-
-@router.get("/setup/app/config")
-async def get_app_config():
-    return {**_app_config(), "source": "env" if os.getenv("KUMA_PUBLIC_URL") else "file" if _app_file_config() else "none"}
-
-
-@router.post("/setup/app/save")
-async def save_app_config(payload: AppConfigIn):
-    cfg = {"kuma_public_url": payload.kuma_public_url.strip().rstrip("/")}
-    _write_json(APP_CONFIG_FILE, cfg)
-    return {"ok": True, **cfg}
-
-
-@router.get("/setup/devices")
-async def list_configured_devices():
-    yaml_data = _load_yaml()
-    out = []
-    for d in yaml_data.get("devices", []) or []:
-        item = {**d}
-        if "token" in item:
-            item["token"] = _mask(item["token"])
-        out.append(item)
-    return out
-
-
-@router.post("/setup/devices")
-async def save_device(payload: DeviceIn):
-    if not payload.name.strip():
-        raise HTTPException(400, "设备名称不能为空")
-    if not payload.host and not payload.did:
-        raise HTTPException(400, "WiFi 设备需填 host，BLE Mesh 设备需填 did")
-
-    yaml_data = _load_yaml()
-    device_list = yaml_data.setdefault("devices", [])
-    lookup = (payload.original_name or payload.name).strip()
-    existing = next((d for d in device_list if d.get("name") == lookup), {})
-    token = payload.token.strip()
-    if payload.host and (_masked(token) or not token):
-        token = existing.get("token", "")
-    if payload.host and len(token) != 32:
-        raise HTTPException(400, "WiFi 设备 token 必须是 32 位十六进制字符")
-    if payload.host and any(c not in string.hexdigits for c in token):
-        raise HTTPException(400, "WiFi 设备 token 必须是 32 位十六进制字符")
-
-    device = {
-        "name": payload.name.strip(),
-        "type": payload.type,
-        "model": payload.model.strip(),
-    }
-    if payload.host:
-        device["host"] = payload.host.strip()
-        device["token"] = token
-    if payload.did:
-        device["did"] = payload.did.strip()
-    if payload.siid is not None:
-        device["siid"] = payload.siid
-    # 保留仅在本地 YAML 声明的协议能力；设置表单不暴露 command / siid / piid 编辑。
-    if existing.get("temperature"):
-        device["temperature"] = existing["temperature"]
-
-    names = [d.get("name") for d in device_list]
-    if lookup in names:
-        device_list[names.index(lookup)] = device
-    elif payload.name.strip() in names:
-        device_list[names.index(payload.name.strip())] = device
-    else:
-        device_list.append(device)
-
-    _save_yaml(yaml_data)
-    devices.load_devices()
-    return {"ok": True, "name": payload.name.strip()}
-
-
-@router.delete("/setup/devices/{name}")
-async def delete_device(name: str):
-    yaml_data = _load_yaml()
-    device_list = yaml_data.get("devices", []) or []
-    new_list = [d for d in device_list if d.get("name") != name]
-    if len(new_list) == len(device_list):
-        raise HTTPException(404, "设备不存在")
-    yaml_data["devices"] = new_list
-    _save_yaml(yaml_data)
-    devices.load_devices()
-    return {"ok": True}
-
-
-@router.post("/setup/xiaomi-cloud/login-step1")
-async def xiaomi_login_step1(payload: XiaomiLoginStep1In):
-    try:
-        from app import xiaomi_login
-        result = await asyncio.to_thread(xiaomi_login.login_step1, payload.username.strip(), payload.password)
-    except Exception as e:
-        raise HTTPException(503, f"小米登录请求失败: {e}") from e
-    if result["status"] == "error":
-        raise HTTPException(400, result["message"])
-    if result["status"] == "success":
-        devices.reset_cloud()
-    return result
-
-
-@router.post("/setup/xiaomi-cloud/login-step2")
-async def xiaomi_login_step2(payload: XiaomiLoginStep2In):
-    try:
-        from app import xiaomi_login
-        username = payload.username.strip() or None
-        password = payload.password.strip() or None
-        result = await asyncio.to_thread(
-            xiaomi_login.login_step2,
-            payload.state_id.strip(),
-            payload.captcha_code.strip(),
-            username,
-            password,
-        )
-    except Exception as e:
-        raise HTTPException(503, f"小米登录请求失败: {e}") from e
-    if result["status"] == "error":
-        raise HTTPException(400, result["message"])
-    if result["status"] == "success":
-        devices.reset_cloud()
-    return result
-
-
-@router.post("/setup/xiaomi-cloud/test")
-async def xiaomi_cloud_test():
-    ok = await asyncio.to_thread(_test_xiaomi_cloud_sync)
-    return {"ok": ok, "message": "云端连接正常" if ok else "云端连接失败，请重新登录"}
-
-
-@router.get("/setup/ble-devices")
-async def list_ble_devices():
-    if not os.path.isfile(BLE_DEVICES_FILE):
-        return []
-    try:
-        with open(BLE_DEVICES_FILE) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return []
 
 
 @router.get("/setup/llm/config")
@@ -747,30 +479,7 @@ if __name__ == "__main__":
         DATA_DIR = tmp
         LLM_CONFIG_FILE = os.path.join(tmp, "llm_config.json")
         NOTIFY_CONFIG_FILE = os.path.join(tmp, "notify_config.json")
-        os.environ["DEVICES_PATH"] = os.path.join(tmp, "devices.yaml")
-
-        _save_yaml({"devices": [{"name": "自检灯", "type": "light", "host": "192.168.1.1", "token": "0" * 32}]})
-        data = _load_yaml()
-        assert len(data["devices"]) == 1
-
-        # 改名不丢 token
-        class _P:
-            name = "客厅灯"
-            original_name = "自检灯"
-            type = "light"
-            model = ""
-            host = "192.168.1.1"
-            token = "****"
-            did = ""
-            siid = None
-
-        # 直接测合并逻辑
-        yaml_data = _load_yaml()
-        existing = yaml_data["devices"][0]
-        token = "****"
-        if _masked(token):
-            token = existing["token"]
-        assert token == "0" * 32
+        BRAVE_CONFIG_FILE = os.path.join(tmp, "brave_config.json")
 
         _write_json(LLM_CONFIG_FILE, {"base_url": "https://example.com/v1", "api_key": "sk-test", "model": "m", "timeout_sec": 10, "enabled": True, "confirm_required": True, "max_actions": 4})
         assert _llm_file_config()["model"] == "m"
@@ -778,6 +487,9 @@ if __name__ == "__main__":
         _write_json(NOTIFY_CONFIG_FILE, {"smtp_host": "smtp.example.com", "smtp_user": "u", "smtp_password": "p", "notify_to": "a@example.com"})
         assert _notify_configured()
 
-        assert not any("SMTP" in m for m in [])  # SMTP 不进 missing 由 status 逻辑保证
+        assert _mask("sk-abcdefgh1234") == "sk-a*******1234"
+        assert _mask("") == ""
+        assert _mask("short") == "*****"
+        assert _masked("sk-****") is True
 
-    print("setup.py 自检通过：设备配置、LLM/SMTP 读写与掩码逻辑正确。")
+    print("setup.py 自检通过：LLM / SMTP / Brave 配置读写与掩码逻辑正确。")

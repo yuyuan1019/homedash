@@ -5,8 +5,4 @@ venv
 __pycache__
 *.pyc
 .env
-config/devices.yaml
 data/*.db
-data/xiaomi_cloud.json
-data/ble_devices.json
-data/xiaomi_session.pkl

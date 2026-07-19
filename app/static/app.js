@@ -9,14 +9,6 @@ const API = {
   users: '/api/admin/users',
   user: (id) => `/api/admin/users/${id}`,
   userPassword: (id) => `/api/admin/users/${id}/password`,
-  devices: '/api/devices',
-  deviceStatus: '/api/devices/status',
-  deviceOn: (name) => `/api/devices/${encodeURIComponent(name)}/on`,
-  deviceOff: (name) => `/api/devices/${encodeURIComponent(name)}/off`,
-  deviceVisibility: (name) => `/api/devices/${encodeURIComponent(name)}/visibility`,
-  deviceOrder: '/api/devices/order',
-  deviceTemperature: (name) => `/api/devices/${encodeURIComponent(name)}/temperature`,
-  uptime: '/api/uptime/status',
   items: '/api/items',
   item: (id) => `/api/items/${id}`,
   itemUsage: (id) => `/api/items/${id}/usage`,
@@ -33,14 +25,6 @@ const API = {
   aiChat: '/api/ai/chat',
   aiItemCategory: '/api/ai/item-category',
   setupStatus: '/api/setup/status',
-  setupDevices: '/api/setup/devices',
-  setupDevice: (name) => `/api/setup/devices/${encodeURIComponent(name)}`,
-  setupXiaomiStep1: '/api/setup/xiaomi-cloud/login-step1',
-  setupXiaomiStep2: '/api/setup/xiaomi-cloud/login-step2',
-  setupXiaomiTest: '/api/setup/xiaomi-cloud/test',
-  setupBleDevices: '/api/setup/ble-devices',
-  setupAppConfig: '/api/setup/app/config',
-  setupAppSave: '/api/setup/app/save',
   setupLlmConfig: '/api/setup/llm/config',
   setupLlmSave: '/api/setup/llm/save',
   setupLlmTest: '/api/setup/llm/test',
@@ -54,36 +38,12 @@ const API = {
   notifyTest: '/api/notify/test',
 };
 
-const TYPE_GROUPS = [
-  { key: 'light', label: '灯光', icon: '💡' },
-  { key: 'airconditioner', label: '空调', icon: '❄️' },
-  { key: 'airpurifier', label: '空气净化器', icon: '🌬️' },
-  { key: 'plug', label: '插座', icon: '🔌' },
-  { key: 'camera', label: '摄像头', icon: '📷' },
-  { key: 'cooker', label: '厨电', icon: '🍳' },
-  { key: 'kettle', label: '厨电', icon: '🍳' },
-  { key: 'waterpuri', label: '厨电', icon: '🍳' },
-  { key: 'feeder', label: '宠物', icon: '🐱' },
-  { key: 'petwaterer', label: '宠物', icon: '🐱' },
-  { key: 'speaker', label: '音箱', icon: '🔊' },
-];
-
-const TYPE_FALLBACK = { key: 'other', label: '其他', icon: '📦' };
-
 let currentTab = 'ai';
-let devicesData = [];
-let deviceStatusMap = {}; // name -> status
-let autoRefreshTimer = null;
 let todoStatus = 'open';
 let chatMessages = [];
 let setupStatusData = null;
-let xiaomiLoginStateId = null;
 let itemCategoryTimer = null;
 let currentUser = null;
-let deviceManageMode = false;
-let draggedDeviceName = null;
-let draggedDeviceElement = null;
-let deviceOrderSaving = false;
 
 // ============ 工具函数 ============
 
@@ -198,8 +158,6 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.id === `tab-${tab}`));
-  if (tab === 'devices') loadDevices();
-  if (tab === 'uptime') loadUptime();
   if (tab === 'items') loadItems();
   if (tab === 'todos') loadTodos();
   if (tab === 'ai') renderAiWorkbench();
@@ -210,11 +168,11 @@ function initTabs() {
   document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
-  
+
   // 滑动切换 tab
   let touchStartX = 0;
   let touchStartY = 0;
-  const tabOrder = ['ai', 'items', 'todos', 'uptime', 'devices'];
+  const tabOrder = ['ai', 'items', 'todos'];
   
   document.addEventListener('touchstart', (e) => {
     touchStartX = e.touches[0].clientX;
@@ -241,417 +199,6 @@ function initTabs() {
       }
     }
   }, { passive: true });
-}
-
-// ============ 设备 Tab ============
-
-function getGroupInfo(type) {
-  const t = String(type).toLowerCase();
-  const found = TYPE_GROUPS.find((g) => g.key === t);
-  if (found) return found;
-  if (['cooker', 'kettle', 'waterpuri'].includes(t)) return TYPE_GROUPS.find((g) => g.key === 'cooker');
-  if (['feeder', 'petwaterer'].includes(t)) return TYPE_GROUPS.find((g) => g.key === 'feeder');
-  return TYPE_FALLBACK;
-}
-
-function getDeviceEmoji(type) {
-  return getGroupInfo(type).icon;
-}
-
-async function toggleDevice(name, turnOn, inputEl) {
-  if (inputEl) inputEl.disabled = true;
-  const url = turnOn ? API.deviceOn(name) : API.deviceOff(name);
-  const { ok, data } = await fetchJSON(url, { method: 'POST' });
-  if (ok) {
-    toast(`${name} 已${turnOn ? '开启' : '关闭'}`, 'success');
-    if (!deviceStatusMap[name]) deviceStatusMap[name] = { name };
-    deviceStatusMap[name].online = true;
-    deviceStatusMap[name].power = turnOn ? 'on' : 'off';
-    renderDevices();
-  } else {
-    if (inputEl) {
-      inputEl.checked = !turnOn; // 回滚开关
-      inputEl.disabled = false;
-    }
-    toast(data?.detail || `${name} 操作失败`, 'error');
-  }
-}
-
-function isPowerOn(power) {
-  return power === true || power === 'on' || power === 1 || power === '1' || power === 'true';
-}
-
-function temperatureOptions(capability, current) {
-  const options = ['<option value="">选择温度</option>'];
-  for (let value = capability.min; value <= capability.max + 1e-7; value += capability.step) {
-    const clean = parseFloat(value.toFixed(6));
-    options.push(`<option value="${clean}" ${Number(current) === clean ? 'selected' : ''}>${clean}℃</option>`);
-  }
-  return options.join('');
-}
-
-function renderTemperatureControl(dev, status) {
-  const capability = dev.capabilities?.temperature;
-  if (!capability) return '';
-  const target = Number.isFinite(Number(status?.target_temperature)) && status?.target_temperature !== null
-    ? Number(status.target_temperature) : null;
-  const lower = target === null ? null : parseFloat((target - capability.step).toFixed(6));
-  const upper = target === null ? null : parseFloat((target + capability.step).toFixed(6));
-  return `<div class="temperature-control">
-    <div class="temperature-label">目标温度 <b>${target === null ? '未知' : `${target}℃`}</b></div>
-    <div class="temperature-actions">
-      <button class="temperature-step" data-name="${esc(dev.name)}" data-temperature="${lower ?? ''}" ${lower === null || lower < capability.min ? 'disabled' : ''}>−</button>
-      <select class="temperature-select" data-name="${esc(dev.name)}" aria-label="${esc(dev.name)}目标温度">${temperatureOptions(capability, target)}</select>
-      <button class="temperature-step" data-name="${esc(dev.name)}" data-temperature="${upper ?? ''}" ${upper === null || upper > capability.max ? 'disabled' : ''}>＋</button>
-    </div>
-  </div>`;
-}
-
-function renderDeviceCard(dev) {
-  const status = deviceStatusMap[dev.name];
-  const online = status?.online;
-  const powerOn = isPowerOn(status?.power);
-  const isCloud = dev.connection === 'cloud';
-  const statusText = online === true ? '在线' : (online === false ? '离线' : '状态未知');
-  const badge = isCloud ? '<span class="badge badge-cloud">云端</span>' :
-    (dev.connection === 'unknown' ? '<span class="badge badge-warn">未配置连接</span>' : '');
-  const disabled = dev.connection === 'unknown';
-  const tileClass = [
-    'device-tile',
-    powerOn ? 'on' : 'off',
-    online === false ? 'offline' : '',
-    deviceManageMode ? 'editing' : '',
-  ].filter(Boolean).join(' ');
-
-  const updated = status?.updated_at ? ` · 更新 ${status.updated_at.slice(11, 16)}` : '';
-  const error = status?.error ? `<div class="device-error">${esc(status.error)}</div>` : '';
-
-  return `
-    <div class="${tileClass}" data-name="${esc(dev.name)}" draggable="${deviceManageMode}">
-      <div class="device-tile-top">
-        <div class="device-icon ${powerOn ? 'on' : ''}">${getDeviceEmoji(dev.type)}</div>
-        ${deviceManageMode ? `<div class="device-edit-actions">
-          <button class="drag-handle" type="button" title="拖动排序" aria-label="拖动 ${esc(dev.name)}">☰</button>
-          <button class="btn btn-small device-visibility" type="button" data-name="${esc(dev.name)}" data-hidden="true">隐藏</button>
-        </div>` : `<label class="switch" title="${disabled ? '不可控' : (powerOn ? '关闭' : '开启')}">
-          <input type="checkbox" class="power-switch" data-name="${esc(dev.name)}"
-            ${powerOn ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
-          <span class="slider"></span>
-        </label>`}
-      </div>
-      <div>
-        <div class="device-name">${esc(dev.name)}</div>
-        <div class="device-meta">
-          <span class="status-dot ${online === true ? 'up' : (online === false ? 'down' : 'unknown')}"></span>
-          ${statusText}${updated}
-          ${badge}
-        </div>
-        ${error}
-        ${deviceManageMode ? '' : renderTemperatureControl(dev, status)}
-      </div>
-    </div>`;
-}
-
-function renderDevices() {
-  const container = document.getElementById('tab-devices');
-  const visible = devicesData.filter((device) => !device.hidden);
-  const hidden = devicesData.filter((device) => device.hidden);
-  let html = `
-    <div class="toolbar">
-      <button class="btn ${deviceManageMode ? 'btn-primary' : ''}" id="manage-devices-btn">${deviceManageMode ? '完成管理' : '管理设备'}</button>
-      ${deviceManageMode ? '' : '<button class="btn" id="refresh-status-btn">刷新状态</button>'}
-    </div>`;
-  if (deviceManageMode) html += '<div class="device-manager-help">拖动任意设备调整全局顺序；隐藏不会删除设备或修改配置。</div>';
-  html += visible.length
-    ? `<div class="device-grid ${deviceManageMode ? 'device-sort-grid' : ''}">${visible.map(renderDeviceCard).join('')}</div>`
-    : '<div class="empty-state">暂无可见设备</div>';
-  if (deviceManageMode) {
-    html += `<div class="hidden-devices-section">
-      <div class="group-title">已隐藏设备 · ${hidden.length}</div>
-      <div class="hidden-device-list">${hidden.map((device) => `<div class="hidden-device-row"><span>${getDeviceEmoji(device.type)} ${esc(device.name)}</span><button class="btn btn-small device-visibility" data-name="${esc(device.name)}" data-hidden="false">恢复显示</button></div>`).join('') || '<div class="empty-state">没有隐藏设备</div>'}</div>
-    </div>`;
-  }
-
-  container.innerHTML = html;
-  bindDeviceEvents();
-  document.getElementById('manage-devices-btn')?.addEventListener('click', toggleDeviceManagement);
-  document.getElementById('refresh-status-btn')?.addEventListener('click', refreshDeviceStatus);
-}
-
-function bindDeviceEvents() {
-  document.querySelectorAll('#tab-devices .power-switch').forEach((input) => {
-    input.addEventListener('change', (e) => {
-      const name = e.target.dataset.name;
-      toggleDevice(name, e.target.checked, e.target);
-    });
-  });
-  document.querySelectorAll('#tab-devices .device-visibility').forEach((button) => button.addEventListener('click', () => setDeviceVisibility(button.dataset.name, button.dataset.hidden === 'true')));
-  document.querySelectorAll('#tab-devices .temperature-step').forEach((button) => button.addEventListener('click', () => setDeviceTemperature(button.dataset.name, Number(button.dataset.temperature), button)));
-  document.querySelectorAll('#tab-devices .temperature-select').forEach((select) => select.addEventListener('change', () => {
-    if (select.value !== '') setDeviceTemperature(select.dataset.name, Number(select.value), select);
-  }));
-  if (deviceManageMode) bindDeviceSorting();
-}
-
-async function setDeviceTemperature(name, temperature, control) {
-  if (!Number.isFinite(temperature)) return;
-  control.disabled = true;
-  const { ok, data } = await fetchJSON(API.deviceTemperature(name), { method: 'PUT', body: JSON.stringify({ temperature }) });
-  control.disabled = false;
-  if (!ok) { toast(data?.detail || `${name} 温度设置失败`, 'error'); return; }
-  if (!deviceStatusMap[name]) deviceStatusMap[name] = { name };
-  deviceStatusMap[name].target_temperature = data.target_temperature;
-  toast(`${name} 已设为 ${data.target_temperature}℃`, 'success');
-  renderDevices();
-}
-
-async function refreshDeviceStatus() {
-  const container = document.getElementById('tab-devices');
-  const btn = document.getElementById('refresh-status-btn');
-  if (btn) btn.disabled = true;
-  const { ok, status, data } = await fetchJSON(API.deviceStatus);
-  if (btn) btn.disabled = false;
-  if (status === 404) {
-    toast('设备状态查询功能开发中', 'info');
-    return;
-  }
-  if (!ok) {
-    toast(data?.detail || '刷新状态失败', 'error');
-    return;
-  }
-  deviceStatusMap = {};
-  (data || []).forEach((s) => { deviceStatusMap[s.name] = s; });
-  renderDevices();
-}
-
-async function loadDevices() {
-  const container = document.getElementById('tab-devices');
-  container.innerHTML = '<div class="loading">加载设备中...</div>';
-  const [listRes, statusRes] = await Promise.all([
-    fetchJSON(`${API.devices}?include_hidden=true`),
-    fetchJSON(API.deviceStatus).catch(() => ({ ok: false, status: 404 })),
-  ]);
-
-  if (!listRes.ok) {
-    container.innerHTML = `<div class="empty-state">设备列表加载失败：${listRes.data?.detail || '未知错误'}</div>`;
-    return;
-  }
-
-  devicesData = listRes.data || [];
-  if (statusRes.status === 404) {
-    toast('设备状态查询功能开发中', 'info');
-  } else if (statusRes.ok) {
-    deviceStatusMap = {};
-    (statusRes.data || []).forEach((s) => { deviceStatusMap[s.name] = s; });
-  }
-  renderDevices();
-}
-
-async function preloadDeviceStatus() {
-  // 预加载设备状态，进入设备页时可立即显示
-  try {
-    const [listRes, statusRes] = await Promise.all([
-      fetchJSON(`${API.devices}?include_hidden=true`),
-      fetchJSON(API.deviceStatus).catch(() => ({ ok: false })),
-    ]);
-    if (listRes.ok) devicesData = listRes.data || [];
-    if (statusRes.ok) {
-      deviceStatusMap = {};
-      (statusRes.data || []).forEach((s) => { deviceStatusMap[s.name] = s; });
-    }
-  } catch (e) {
-    // 预加载失败不影响后续操作
-  }
-}
-
-async function toggleDeviceManagement() {
-  deviceManageMode = !deviceManageMode;
-  if (!devicesData.length) await loadDevices();
-  else renderDevices();
-}
-
-async function setDeviceVisibility(name, hidden) {
-  const { ok, data } = await fetchJSON(API.deviceVisibility(name), { method: 'PUT', body: JSON.stringify({ hidden }) });
-  if (!ok) { toast(data?.detail || '更新设备展示失败', 'error'); return; }
-  toast(hidden ? `${name} 已隐藏` : `${name} 已恢复显示`, 'success');
-  loadDevices();
-}
-
-function mergedDeviceOrder() {
-  const visibleNames = [...document.querySelectorAll('#tab-devices .device-sort-grid .device-tile')].map((tile) => tile.dataset.name);
-  let visibleIndex = 0;
-  return devicesData.map((device) => device.hidden ? device.name : visibleNames[visibleIndex++]);
-}
-
-async function saveDeviceOrderFromDom() {
-  if (deviceOrderSaving) return;
-  const deviceNames = mergedDeviceOrder();
-  if (deviceNames.some((name) => !name)) return;
-  deviceOrderSaving = true;
-  const { ok, data } = await fetchJSON(API.deviceOrder, { method: 'PUT', body: JSON.stringify({ device_names: deviceNames }) });
-  deviceOrderSaving = false;
-  if (!ok) {
-    toast(data?.detail || '设备顺序保存失败', 'error');
-    loadDevices();
-    return;
-  }
-  const byName = Object.fromEntries(devicesData.map((device) => [device.name, device]));
-  devicesData = data.device_names.map((name) => byName[name]);
-  toast('设备顺序已保存', 'success');
-  renderDevices();
-}
-
-function moveDraggedBefore(target, clientX, clientY) {
-  const dragged = draggedDeviceElement;
-  if (!dragged || !target || dragged === target) return;
-  const rect = target.getBoundingClientRect();
-  const after = clientY > rect.top + rect.height / 2 || (Math.abs(clientY - (rect.top + rect.height / 2)) < rect.height / 3 && clientX > rect.left + rect.width / 2);
-  target.parentElement.insertBefore(dragged, after ? target.nextSibling : target);
-}
-
-function bindDeviceSorting() {
-  const grid = document.querySelector('#tab-devices .device-sort-grid');
-  if (!grid) return;
-  grid.addEventListener('dragover', (event) => {
-    event.preventDefault();
-    const target = event.target.closest('.device-tile');
-    if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
-  });
-  grid.addEventListener('dragenter', (event) => {
-    event.preventDefault();
-    const target = event.target.closest('.device-tile');
-    if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
-  });
-  grid.addEventListener('drop', (event) => {
-    event.preventDefault();
-    const target = event.target.closest('.device-tile');
-    if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
-  });
-  grid.querySelectorAll('.device-tile').forEach((tile) => {
-    tile.addEventListener('dragstart', (event) => {
-      draggedDeviceName = tile.dataset.name;
-      draggedDeviceElement = tile;
-      tile.classList.add('dragging');
-      event.dataTransfer.effectAllowed = 'move';
-    });
-    tile.addEventListener('dragend', () => {
-      tile.classList.remove('dragging');
-      draggedDeviceName = null;
-      draggedDeviceElement = null;
-      saveDeviceOrderFromDom();
-    });
-  });
-  grid.querySelectorAll('.drag-handle').forEach((handle) => {
-    let active = false;
-    let timer = null;
-    const finish = () => {
-      clearTimeout(timer);
-      if (!active) return;
-      active = false;
-      handle.closest('.device-tile').classList.remove('dragging');
-      draggedDeviceName = null;
-      draggedDeviceElement = null;
-      saveDeviceOrderFromDom();
-    };
-    handle.addEventListener('pointerdown', (event) => {
-      timer = setTimeout(() => {
-        active = true;
-        draggedDeviceName = handle.closest('.device-tile').dataset.name;
-        draggedDeviceElement = handle.closest('.device-tile');
-        draggedDeviceElement.classList.add('dragging');
-        handle.setPointerCapture?.(event.pointerId);
-      }, 250);
-    });
-    handle.addEventListener('pointermove', (event) => {
-      if (!active) return;
-      event.preventDefault();
-      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.device-tile');
-      if (target?.parentElement === grid) moveDraggedBefore(target, event.clientX, event.clientY);
-    });
-    handle.addEventListener('pointerup', finish);
-    handle.addEventListener('pointercancel', finish);
-  });
-}
-
-// ============ 监控 Tab ============
-
-function fmtUptimeUrl(url) {
-  if (!url) return '';
-  return String(url).replace(/^https?:\/\//, '').replace(/\/$/, '');
-}
-
-function fmtAgo(ts) {
-  if (!ts) return '—';
-  const sec = Math.floor(Date.now() / 1000 - Number(ts));
-  if (sec < 0 || Number.isNaN(sec)) return '—';
-  if (sec < 60) return `${sec} 秒前`;
-  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟前`;
-  if (sec < 86400) return `${Math.floor(sec / 3600)} 小时前`;
-  return `${Math.floor(sec / 86400)} 天前`;
-}
-
-function renderUptime(res) {
-  const container = document.getElementById('tab-uptime');
-  const link = res.public_url ? `<a class="btn btn-primary" href="${esc(res.public_url)}" target="_blank" rel="noopener">打开 Uptime 配置</a>` : '<span class="setup-help">设置 <code>KUMA_PUBLIC_URL</code> 后可从这里跳转到 Uptime Kuma 配置页。</span>';
-  const toolbar = `<div class="toolbar">${link}<button class="btn" id="refresh-uptime-btn">刷新监控</button></div>`;
-  if (!res.available || res.source === 'unavailable') {
-    container.innerHTML = `${toolbar}<div class="empty-state">Uptime Kuma 数据库未连接，请检查 KUMA_DB_PATH 配置</div>`;
-    document.getElementById('refresh-uptime-btn')?.addEventListener('click', loadUptime);
-    return;
-  }
-  const monitors = res.monitors || [];
-  if (!monitors.length) {
-    container.innerHTML = `${toolbar}<div class="empty-state">暂无监控数据</div>`;
-    document.getElementById('refresh-uptime-btn')?.addEventListener('click', loadUptime);
-    return;
-  }
-
-  const sorted = monitors.slice().sort((a, b) => (a.status === 1 ? 1 : -1) - (b.status === 1 ? 1 : -1));
-  const total = monitors.length;
-  const upCount = monitors.filter((m) => m.status === 1).length;
-  const downCount = total - upCount;
-  const rate = total ? Math.round((upCount / total) * 100) : 0;
-
-  container.innerHTML = `
-    ${toolbar}
-    <div class="uptime-summary">
-      <div class="uptime-summary-item"><div class="uptime-summary-value">${total}</div><div class="uptime-summary-label">监控总数</div></div>
-      <div class="uptime-summary-item up"><div class="uptime-summary-value">${upCount}</div><div class="uptime-summary-label">在线</div></div>
-      <div class="uptime-summary-item down"><div class="uptime-summary-value">${downCount}</div><div class="uptime-summary-label">离线</div></div>
-      <div class="uptime-summary-item rate"><div class="uptime-summary-value">${rate}%</div><div class="uptime-summary-label">可用率</div></div>
-    </div>
-    <div class="uptime-grid">
-      ${sorted.map((m) => {
-        const up = m.status === 1;
-        const url = fmtUptimeUrl(m.url);
-        return `
-          <div class="uptime-card ${up ? 'up' : 'down'}" title="${esc(m.msg || '')}">
-            <div class="uptime-card-header">
-              <div class="uptime-card-name">${esc(m.name)}</div>
-              <span class="uptime-status-badge ${up ? 'up' : 'down'}">
-                <span class="status-dot ${up ? 'up' : 'down'}"></span>${up ? 'UP' : 'DOWN'}
-              </span>
-            </div>
-            ${url ? `<div class="uptime-card-url">${esc(url)}</div>` : ''}
-            <div class="uptime-card-footer">
-              <span class="uptime-card-ping">${up && m.ping ? `⏱ ${m.ping} ms` : '—'}</span>
-              <span>${fmtAgo(m.time)}</span>
-            </div>
-          </div>`;
-      }).join('')}
-    </div>`;
-  document.getElementById('refresh-uptime-btn')?.addEventListener('click', loadUptime);
-}
-
-async function loadUptime() {
-  const container = document.getElementById('tab-uptime');
-  container.innerHTML = '<div class="loading">加载监控中...</div>';
-  const { ok, data } = await fetchJSON(API.uptime);
-  if (!ok) {
-    container.innerHTML = `<div class="empty-state">监控加载失败：${data?.detail || '未知错误'}</div>`;
-    return;
-  }
-  renderUptime(data);
 }
 
 // ============ 日用品 Tab ============
@@ -1740,8 +1287,6 @@ function initRefresh() {
   btn.addEventListener('click', () => {
     btn.disabled = true;
     setTimeout(() => (btn.disabled = false), 2000);
-    if (currentTab === 'devices') loadDevices();
-    if (currentTab === 'uptime') loadUptime();
     if (currentTab === 'items') loadItems();
     if (currentTab === 'todos') loadTodos();
     if (currentTab === 'ai') renderAiWorkbench();
@@ -1779,13 +1324,6 @@ function initAccountMenu() {
   document.addEventListener('click', closeMenu);
 }
 
-function initAutoRefresh() {
-  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-  autoRefreshTimer = setInterval(() => {
-    if (currentTab === 'uptime') loadUptime();
-  }, 60000);
-}
-
 // ============ 启动 ============
 
 function initApp() {
@@ -1794,9 +1332,7 @@ function initApp() {
   initTabs();
   initRefresh();
   initAccountMenu();
-  initAutoRefresh();
   if (currentUser.role === 'admin') loadSetupBanner();
-  preloadDeviceStatus();  // 预加载设备状态
   switchTab('ai');
 }
 
@@ -1908,18 +1444,15 @@ function renderSetup() {
   const statusClass = (ok) => (ok ? 'status-ok' : 'status-missing');
   const statusText = (ok, label) => `<span class="${statusClass(ok)}">${ok ? '✅' : '❌'} ${label}</span>`;
   const statusOptional = (ok, label) => ok ? statusText(true, label) : `<span class="status-optional">○ ${label} 未配置</span>`;
-  const showDeviceSetup = !(s.devices_yaml_exists && s.devices_count > 0 && s.xiaomi_cloud_status);
 
   container.innerHTML = `
     <div class="card">
       <div class="section-title">配置总览</div>
       <div class="setup-status-grid">
-        <div class="setup-status-item">${statusText(s.devices_yaml_exists && s.devices_count > 0, `米家设备 (${s.devices_count})`)}</div>
-        <div class="setup-status-item">${statusText(s.xiaomi_cloud_status, '小米云端凭据')}</div>
         <div class="setup-status-item">${statusText(s.llm_configured, 'AI 工作台 LLM')}</div>
         <div class="setup-status-item">${statusOptional(s.smtp_configured, 'SMTP 周报（可选）')}</div>
         <div class="setup-status-item">${statusOptional(s.brave_configured, 'Brave 网络搜索（可选）')}</div>
-        <div class="setup-status-item">${statusOptional(s.kuma_public_url_configured, 'Uptime 跳转（可选）')}</div>
+        <div class="setup-status-item">${statusOptional(s.agent_token_configured, 'Agent Token（可选）')}</div>
       </div>
       ${s.missing && s.missing.length ? `<div class="setup-missing">待处理：${esc(s.missing.join('、'))}</div>` : '<div class="setup-ok">全部配置就绪 🎉</div>'}
     </div>
@@ -1939,65 +1472,6 @@ function renderSetup() {
         <div id="user-create-result" class="setup-result"></div>
       </form>
       <div id="user-list" class="setup-subsection"><div class="loading">加载用户中...</div></div>
-    </div>
-
-    <div class="card ${showDeviceSetup ? '' : 'hidden'}">
-      <div class="section-title">米家设备</div>
-      <div class="setup-help">
-        <b>说明：</b>WiFi 设备需要 host + 32 位 token；BLE Mesh 设备需要 did（可从小米云端登录后获取）。
-        <br>token 获取方式：使用 <code>miiocli discover</code> 或从米家备份中提取。
-      </div>
-      <details class="setup-subsection">
-        <summary>查看已配置设备</summary>
-        <div id="setup-device-list" class="setup-subsection"><div class="loading">加载中...</div></div>
-      </details>
-      <form id="setup-device-form" class="setup-form">
-        <input type="hidden" id="device-edit-name">
-        <div class="form-row">
-          <div class="form-group"><label>名称</label><input type="text" id="device-name" placeholder="客厅灯" required></div>
-          <div class="form-group"><label>类型</label><select id="device-type"><option value="light">灯</option><option value="plug">插座</option><option value="outlet"> outlet</option><option value="airconditioner">空调</option><option value="switch">开关</option><option value="airpurifier">空气净化器</option><option value="other">其他</option></select></div>
-        </div>
-        <div class="form-group"><label>模型 model</label><input type="text" id="device-model" placeholder="yeelink.light.lamp1"></div>
-        <div class="form-row">
-          <div class="form-group"><label>局域网 host（WiFi 设备）</label><input type="text" id="device-host" placeholder="192.168.1.100"></div>
-          <div class="form-group"><label>token（WiFi 设备）</label><input type="text" id="device-token" placeholder="32 位十六进制" maxlength="32"></div>
-        </div>
-        <div class="form-row">
-          <div class="form-group"><label>云端 did（BLE Mesh 设备）</label><input type="text" id="device-did" placeholder="123456789"></div>
-          <div class="form-group"><label>siid（可选，默认 2）</label><input type="number" id="device-siid" placeholder="2"></div>
-        </div>
-        <div class="form-actions"><button type="submit" class="btn btn-primary">保存设备</button><button type="button" class="btn" id="device-form-reset">重置</button></div>
-      </form>
-    </div>
-
-    <div class="card ${showDeviceSetup ? '' : 'hidden'}">
-      <div class="section-title">小米云端登录</div>
-      <div class="setup-help">用于 BLE Mesh 设备控制。登录成功后凭据保存在 <code>data/xiaomi_cloud.json</code>，不保存密码。</div>
-      <form id="setup-xiaomi-form" class="setup-form">
-        <div class="form-row">
-          <div class="form-group"><label>小米账号</label><input type="text" id="xiaomi-username" placeholder="手机号/邮箱"></div>
-          <div class="form-group"><label>密码</label><input type="password" id="xiaomi-password" placeholder="小米密码"></div>
-        </div>
-        <div id="xiaomi-captcha-box" class="hidden">
-          <div class="form-group"><label>验证码</label><img id="xiaomi-captcha-img" alt="验证码"><input type="text" id="xiaomi-captcha-code" placeholder="输入验证码"></div>
-        </div>
-        <div class="form-actions">
-          <button type="submit" class="btn btn-primary" id="xiaomi-login-btn">${xiaomiLoginStateId ? '提交验证码' : '登录'}</button>
-          <button type="button" class="btn" id="xiaomi-test-btn">测试连接</button>
-          <button type="button" class="btn" id="xiaomi-ble-btn">查看 BLE 设备</button>
-        </div>
-        <div id="xiaomi-login-result" class="setup-result"></div>
-      </form>
-      <div id="setup-ble-list" class="setup-subsection"></div>
-    </div>
-
-    <div class="card">
-      <div class="section-title">监控跳转</div>
-      <form id="setup-app-form" class="setup-form">
-        <div class="form-group"><label>Uptime Kuma 页面地址</label><input type="text" id="kuma-public-url" placeholder="http://127.0.0.1:3001"></div>
-        <div class="form-actions"><button type="submit" class="btn btn-primary">保存</button></div>
-        <div id="app-config-result" class="setup-result"></div>
-      </form>
     </div>
 
     <details class="card">
@@ -2069,8 +1543,6 @@ function renderSetup() {
   `;
 
   bindSetupEvents();
-  if (showDeviceSetup) loadDeviceList();
-  loadAppConfig();
   loadLlmConfig();
   loadBraveConfig();
   loadNotifyConfig();
@@ -2078,12 +1550,6 @@ function renderSetup() {
 }
 
 function bindSetupEvents() {
-  document.getElementById('setup-device-form').addEventListener('submit', saveSetupDevice);
-  document.getElementById('device-form-reset').addEventListener('click', resetDeviceForm);
-  document.getElementById('setup-xiaomi-form').addEventListener('submit', submitXiaomiLogin);
-  document.getElementById('xiaomi-test-btn').addEventListener('click', testXiaomiCloud);
-  document.getElementById('xiaomi-ble-btn').addEventListener('click', loadBleDevices);
-  document.getElementById('setup-app-form').addEventListener('submit', saveAppConfig);
   document.getElementById('setup-llm-form').addEventListener('submit', saveLlmConfig);
   document.getElementById('llm-test-only-btn').addEventListener('click', testLlmConfig);
   document.getElementById('llm-models-btn').addEventListener('click', loadLlmModels);
@@ -2183,85 +1649,6 @@ async function deleteManagedUser(userId) {
   if (ok) loadUsers();
 }
 
-async function loadDeviceList() {
-  const container = document.getElementById('setup-device-list');
-  const { ok, data } = await fetchJSON(API.setupDevices);
-  if (!ok || !data || !data.length) {
-    container.innerHTML = '<div class="empty-state">暂无设备配置</div>';
-    return;
-  }
-  container.innerHTML = `<div class="setup-list">${data.map((d) => `
-    <div class="setup-list-item">
-      <details class="device-config-detail">
-        <summary><b>${esc(d.name)}</b> <span class="tag">${esc(d.type)}</span></summary>
-        <small>model: ${esc(d.model || '—')}</small><br>
-        <small>${d.host ? `host: ${esc(d.host)}` : `did: ${esc(d.did || '—')}`}</small>
-        ${d.siid ? `<br><small>siid: ${esc(d.siid)}</small>` : ''}
-      </details>
-      <div class="setup-list-actions">
-        <button class="btn btn-small" data-action="edit" data-name="${esc(d.name)}">编辑</button>
-        <button class="btn btn-small btn-danger" data-action="delete" data-name="${esc(d.name)}">删除</button>
-      </div>
-    </div>`).join('')}</div>`;
-  container.querySelectorAll('[data-action="edit"]').forEach((btn) => btn.addEventListener('click', () => editDevice(btn.dataset.name)));
-  container.querySelectorAll('[data-action="delete"]').forEach((btn) => btn.addEventListener('click', () => deleteSetupDevice(btn.dataset.name)));
-}
-
-async function saveSetupDevice(e) {
-  e.preventDefault();
-  const payload = {
-    name: document.getElementById('device-name').value.trim(),
-    original_name: document.getElementById('device-edit-name').value.trim(),
-    type: document.getElementById('device-type').value,
-    model: document.getElementById('device-model').value.trim(),
-    host: document.getElementById('device-host').value.trim(),
-    token: document.getElementById('device-token').value.trim(),
-    did: document.getElementById('device-did').value.trim(),
-    siid: document.getElementById('device-siid').value ? parseInt(document.getElementById('device-siid').value, 10) : null,
-  };
-  const { ok, data } = await fetchJSON(API.setupDevices, { method: 'POST', body: JSON.stringify(payload) });
-  if (!ok) { toast(data?.detail || '保存失败', 'error'); return; }
-  toast('设备已保存', 'success');
-  resetDeviceForm();
-  await loadDeviceList();
-  await refreshSetupOverview();
-}
-
-async function deleteSetupDevice(name) {
-  if (!confirm(`确定删除设备「${name}」？`)) return;
-  const { ok, data } = await fetchJSON(API.setupDevice(name), { method: 'DELETE' });
-  if (!ok) { toast(data?.detail || '删除失败', 'error'); return; }
-  toast('设备已删除', 'success');
-  await loadDeviceList();
-  await refreshSetupOverview();
-}
-
-function editDevice(name) {
-  fetchJSON(API.setupDevices).then(({ ok, data }) => {
-    if (!ok) return;
-    const d = data.find((x) => x.name === name);
-    if (!d) return;
-    document.getElementById('device-name').value = d.name || '';
-    document.getElementById('device-type').value = d.type || 'light';
-    document.getElementById('device-model').value = d.model || '';
-    document.getElementById('device-host').value = d.host || '';
-    document.getElementById('device-token').value = d.token || '';
-    document.getElementById('device-did').value = d.did || '';
-    document.getElementById('device-siid').value = d.siid || '';
-    document.getElementById('device-edit-name').value = d.name || '';
-  });
-}
-
-function resetDeviceForm() {
-  document.getElementById('setup-device-form').reset();
-  document.getElementById('device-edit-name').value = '';
-}
-
-function updateXiaomiLoginButton() {
-  const btn = document.getElementById('xiaomi-login-btn');
-  if (btn) btn.textContent = xiaomiLoginStateId ? '提交验证码' : '登录';
-}
-
 async function refreshSetupOverview() {
   await loadSetupStatus();
   await loadSetupBanner();
@@ -2272,12 +1659,10 @@ async function refreshSetupOverview() {
   const statusText = (ok, label) => `<span class="${ok ? 'status-ok' : 'status-missing'}">${ok ? '✅' : '❌'} ${label}</span>`;
   const statusOptional = (ok, label) => ok ? statusText(true, label) : `<span class="status-optional">○ ${label} 未配置</span>`;
   grid.innerHTML = `
-    <div class="setup-status-item">${statusText(s.devices_yaml_exists && s.devices_count > 0, `米家设备 (${s.devices_count})`)}</div>
-    <div class="setup-status-item">${statusText(s.xiaomi_cloud_status, '小米云端凭据')}</div>
     <div class="setup-status-item">${statusText(s.llm_configured, 'AI 工作台 LLM')}</div>
     <div class="setup-status-item">${statusOptional(s.smtp_configured, 'SMTP 周报（可选）')}</div>
     <div class="setup-status-item">${statusOptional(s.brave_configured, 'Brave 网络搜索（可选）')}</div>
-    <div class="setup-status-item">${statusOptional(s.kuma_public_url_configured, 'Uptime 跳转（可选）')}</div>`;
+    <div class="setup-status-item">${statusOptional(s.agent_token_configured, 'Agent Token（可选）')}</div>`;
   const missing = document.querySelector('.setup-missing, .setup-ok');
   if (missing) {
     if (s.missing && s.missing.length) {
@@ -2290,116 +1675,6 @@ async function refreshSetupOverview() {
   }
 }
 
-async function submitXiaomiLogin(e) {
-  e.preventDefault();
-  const btn = document.getElementById('xiaomi-login-btn');
-  const resultBox = document.getElementById('xiaomi-login-result');
-  const captchaBox = document.getElementById('xiaomi-captcha-box');
-  const captchaImg = document.getElementById('xiaomi-captcha-img');
-
-  btn.disabled = true;
-  try {
-    if (xiaomiLoginStateId) {
-      const { ok, data } = await fetchJSON(API.setupXiaomiStep2, {
-        method: 'POST',
-        body: JSON.stringify({
-          state_id: xiaomiLoginStateId,
-          captcha_code: document.getElementById('xiaomi-captcha-code').value.trim(),
-          username: document.getElementById('xiaomi-username').value.trim(),
-          password: document.getElementById('xiaomi-password').value,
-        }),
-      });
-      if (!ok) { resultBox.textContent = data?.detail || '登录失败'; resultBox.className = 'setup-result error'; return; }
-      if (data.status === 'success') {
-        xiaomiLoginStateId = null;
-        captchaBox.classList.add('hidden');
-        resultBox.textContent = `登录成功，userId=${data.user_id}`;
-        resultBox.className = 'setup-result success';
-        updateXiaomiLoginButton();
-        await refreshSetupOverview();
-      } else if (data.status === 'captcha_required') {
-        xiaomiLoginStateId = data.state_id;
-        captchaImg.src = data.captcha_base64;
-        captchaBox.classList.remove('hidden');
-        resultBox.textContent = data.message || '需要验证码';
-        resultBox.className = 'setup-result';
-        updateXiaomiLoginButton();
-      }
-    } else {
-      const { ok, data } = await fetchJSON(API.setupXiaomiStep1, {
-        method: 'POST',
-        body: JSON.stringify({
-          username: document.getElementById('xiaomi-username').value.trim(),
-          password: document.getElementById('xiaomi-password').value,
-        }),
-      });
-      if (!ok) { resultBox.textContent = data?.detail || '登录失败'; resultBox.className = 'setup-result error'; return; }
-      if (data.status === 'success') {
-        resultBox.textContent = `登录成功，userId=${data.user_id}`;
-        resultBox.className = 'setup-result success';
-        await refreshSetupOverview();
-      } else if (data.status === 'captcha_required') {
-        xiaomiLoginStateId = data.state_id;
-        captchaImg.src = data.captcha_base64;
-        captchaBox.classList.remove('hidden');
-        resultBox.textContent = data.message || '需要验证码';
-        resultBox.className = 'setup-result';
-        updateXiaomiLoginButton();
-      }
-    }
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function testXiaomiCloud() {
-  const resultBox = document.getElementById('xiaomi-login-result');
-  resultBox.textContent = '测试中...';
-  const { ok, data } = await fetchJSON(API.setupXiaomiTest, { method: 'POST' });
-  resultBox.textContent = data?.message || (ok ? '连接正常' : '连接失败');
-  resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
-}
-
-async function loadBleDevices() {
-  const container = document.getElementById('setup-ble-list');
-  container.innerHTML = '<div class="loading">加载中...</div>';
-  const { ok, data } = await fetchJSON(API.setupBleDevices);
-  if (!ok) { container.innerHTML = '<div class="empty-state">加载失败</div>'; return; }
-  if (!data || !data.length) { container.innerHTML = '<div class="empty-state">暂无 BLE 设备记录，请先登录小米云端</div>'; return; }
-  container.innerHTML = `<div class="setup-list">${data.map((d) => `
-    <div class="setup-list-item">
-      <div><b>${esc(d.name)}</b> <small>did=${esc(d.did)}</small><br><small>model=${esc(d.model)}</small></div>
-      <button class="btn btn-small" data-did="${esc(d.did)}" data-name="${esc(d.name)}" data-model="${esc(d.model)}">填入</button>
-    </div>`).join('')}</div>`;
-  container.querySelectorAll('button[data-did]').forEach((btn) => btn.addEventListener('click', () => {
-    document.getElementById('device-name').value = btn.dataset.name;
-    document.getElementById('device-did').value = btn.dataset.did;
-    document.getElementById('device-model').value = btn.dataset.model;
-    document.getElementById('device-type').value = 'light';
-    toast('已填入设备表单', 'info');
-  }));
-}
-
-async function loadAppConfig() {
-  const { ok, data } = await fetchJSON(API.setupAppConfig);
-  if (!ok || !data) return;
-  document.getElementById('kuma-public-url').value = data.kuma_public_url || '';
-}
-
-async function saveAppConfig(e) {
-  e.preventDefault();
-  const resultBox = document.getElementById('app-config-result');
-  const payload = { kuma_public_url: document.getElementById('kuma-public-url').value.trim() };
-  const { ok, data } = await fetchJSON(API.setupAppSave, { method: 'POST', body: JSON.stringify(payload) });
-  if (!ok) {
-    resultBox.textContent = data?.detail || '保存失败';
-    resultBox.className = 'setup-result error';
-    return;
-  }
-  resultBox.textContent = '监控跳转地址已保存';
-  resultBox.className = 'setup-result success';
-  await refreshSetupOverview();
-}
 
 async function loadLlmConfig() {
   const { ok, data } = await fetchJSON(API.setupLlmConfig);

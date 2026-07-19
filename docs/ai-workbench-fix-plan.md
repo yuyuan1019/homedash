@@ -222,4 +222,4 @@ curl -s http://127.0.0.1:8088/api/setup/llm/models
 - 不新增模型供应商 SDK。
 - 不引入前端框架。
 - 不让 LLM 直接执行 SQL。
-- 不把 API Key、SMTP 密码、米家 token 写入日志或前端响应。
+- 不把 API Key、SMTP 密码写入日志或前端响应。

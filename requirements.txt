@@ -1,9 +1,6 @@
 fastapi
 python-multipart
 uvicorn[standard]
-python-miio
-pyyaml
 httpx
 aiosqlite
 python-dotenv
-micloud

@@ -9,7 +9,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY config/devices.yaml.example ./config/devices.yaml.example
 COPY .env.example ./.env.example
 
 EXPOSE 8000

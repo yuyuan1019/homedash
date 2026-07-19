@@ -68,12 +68,6 @@ CREATE TABLE IF NOT EXISTS ai_audit (
     reverted INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
-CREATE TABLE IF NOT EXISTS device_preferences (
-    device_name TEXT PRIMARY KEY,
-    hidden INTEGER NOT NULL DEFAULT 0,
-    sort_order INTEGER,
-    updated_at TEXT DEFAULT (datetime('now'))
-);
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -123,7 +117,6 @@ async def init_db() -> None:
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
     await _ensure_columns(_db, "items", {"location": "TEXT", "expires_at": "TEXT"})
-    await _ensure_columns(_db, "device_preferences", {"sort_order": "INTEGER"})
     await _ensure_columns(_db, "todos", {"images": "TEXT"})
     await _ensure_columns(_db, "ai_audit", {
         "stage": "TEXT", "session_id": "TEXT", "llm_model": "TEXT",

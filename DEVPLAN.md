@@ -1,7 +1,7 @@
 # HomeDash DEVPLAN（待办规格书）
 
 > ⬜ 本文档是**待办规格书**，不是已完成记录。  
-> 已完成基线以**代码**为准：items/devices/uptime/todos 后端、四 Tab 前端（米家风格）、BLE Mesh 云端开关、Docker、设备 power 状态。
+> 已完成基线以**代码**为准：items/todos 后端、三 Tab 前端。
 > **本文件中的增强项在落地前均视为未实现**；编码时勿把下文 API/文件名当成仓库里已有。
 
 ## AI 实现约束（所有待办通用）
@@ -18,12 +18,25 @@
 
 ---
 
+## 已下线：米家设备控制、Uptime 监控、小米云端登录（2026-07-19）
+
+**状态**：整块功能已从代码库移除。原因：家庭日常极少使用，维护开销大且带来密钥/依赖风险。以下原有内容不再维护，仅保留在 git 历史里。
+
+- 删除文件：`app/modules/devices.py`、`app/modules/uptime.py`、`app/xiaomi_login.py`、`app/discover_devices.py`、`config/devices.yaml.example`（整个 `config/` 目录亦已删除）
+- 删除依赖：`python-miio`、`pyyaml`、`micloud`
+- 删除环境变量：`DEVICES_PATH`、`XIAOMI_USERNAME`、`XIAOMI_PASSWORD`、`KUMA_DB_PATH`、`KUMA_DATA_DIR`、`KUMA_PUBLIC_URL`
+- 删除表：`device_preferences`（旧库该表可保留，不再引用；后续用户如需清理可手动 `DROP TABLE`）
+- 删除 Tab：「设备控制」「设备&网站监控」；前端仅保留「AI 工作台 / 日用品 / 重点待办」三 Tab
+
+原「待办 1（Docker 部署细化验证）」「待办 2（设备属性控制）」「待办 3（设备状态增强）」「待办 3A（设备展示管理与状态说明）」「待办 4（粘贴导入米家设备）」「待办 10（设备页内管理、全局自由排序与空调温控）」**整节废弃**，不要再按其规格实现或修复。
+
+---
+
 ## 当前已完成基线
 
-- 后端：`app/modules/items.py`、`app/modules/devices.py`、`app/modules/uptime.py`
+- 后端：`app/modules/items.py`、`app/modules/todos.py`、`app/modules/notify.py`、`app/modules/ai_workbench.py`、`app/modules/ai_executor.py`、`app/modules/auth.py`、`app/modules/users.py`、`app/modules/setup.py`
 - 前端：`app/static/index.html`、`app/static/style.css`、`app/static/app.js`
 - 部署：`Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.env.example`
-- 设备状态：`GET /api/devices/status` 返回 `[{name, online, power}]`
 - 日用品预测（**现状**）：EWMA + 安全库存、购买间隔与品类先验兜底（见下方「现状 vs 目标」）
 
 ## 待办 0：日用品预测升级（EWMA + 安全库存）— **已完成**
@@ -224,7 +237,9 @@
 
 ---
 
-## 待办 1：Docker 部署细化验证
+## 待办 1（已废弃）：Docker 部署细化验证
+
+> 设备与监控功能已下线，本待办的验收命令中的 `/api/devices`、`/api/uptime/status` 均不再存在。此节保留仅供历史参考。
 
 **目标**：保证 fresh clone 后只改 `.env` 和 `config/devices.yaml` 即可启动。
 
@@ -245,7 +260,9 @@ docker compose down
 
 **注意**：默认 Docker bridge 网络即可按 IP 控制米家设备；只有要做局域网广播发现时才考虑 host 网络。
 
-## 待办 2：设备属性控制（最小版）
+## 待办 2（已废弃）：设备属性控制（最小版）
+
+> 米家设备模块已整体移除，本待办不再实现。
 
 **目标**：先只做灯光亮度，不做全设备属性系统。
 
@@ -261,11 +278,15 @@ Content-Type: application/json
 **后端文件**：`app/modules/devices.py`  
 **规则**：只允许声明属性；越界 400；BLE Mesh 暂不支持属性控制；不新增依赖。
 
-## 待办 3：设备状态增强（可选）
+## 待办 3（已废弃）：设备状态增强（可选）
+
+> 米家设备模块已整体移除，本待办不再实现。
 
 `/api/devices/status` 在 power 之外按需返回亮度等 `props`；单台 3s 超时；单台失败不影响其他设备。
 
-## 待办 3A：设备展示管理与状态说明 — **已完成**
+## 待办 3A（已废弃）：设备展示管理与状态说明
+
+> 米家设备模块已整体移除，本待办已废弃。
 
 **完成情况（2026-07-13）**：已新增 `device_preferences` 展示偏好表、设备隐藏/恢复 API 和设备页管理弹窗。隐藏状态持久化于 SQLite，不改 YAML；默认设备列表与状态刷新跳过隐藏设备。状态响应新增 `updated_at` 与脱敏 `error`，并已移除未实现的设备属性和粘贴导入假入口。
 
@@ -301,7 +322,9 @@ Content-Type: application/json
 - 不做粘贴导入设备，不写回 YAML。
 - 不做按房间排序、别名等额外设备元数据。
 
-## 待办 4：粘贴导入米家设备（推迟）
+## 待办 4（已废弃）：粘贴导入米家设备
+
+> 米家设备模块已整体移除，本待办不再实现。
 
 **状态**：先不做。当前手写 `config/devices.yaml` 足够。  
 真实设备多到维护 YAML 明显痛苦时再做 `POST /api/devices/import`。
@@ -625,7 +648,7 @@ GET    /api/todos/summary                {open_count, overdue_count, top: [...]}
 
 ### 8.5 前端（第四 Tab）
 
-`index.html` 增加 Tab：`设备 | 监控 | 日用品 | 待办`（**允许改骨架**）。
+`index.html` 增加 Tab：`日用品 | 待办`（**允许改骨架**）。
 
 - 列表：标题、优先级、截止日期、图片缩略图
 - 表单：标题、备注、优先级、截止日期与图片上传/剪贴板粘贴（最多 5 张，每张 10MB）；不展示负责人及提醒相关字段
@@ -698,7 +721,7 @@ curl -s -X POST http://127.0.0.1:8088/api/agent/todos/1/remind-fired \
 
 ### 7.1 产品形态（工作台 UI）
 
-建议第五入口或第四之后：`设备 | 监控 | 日用品 | 待办 | **AI**`（实现时 Tab 名「AI」或「助手」）。
+建议独立 Tab：`日用品 | 待办 | **AI**`（实现时 Tab 名「AI」或「助手」）。
 
 **布局（米家浅色一致）：**
 
@@ -986,8 +1009,7 @@ CREATE TABLE IF NOT EXISTS ai_audit (
 | 能力 | 普通用户 `user` | 管理员 `admin` |
 |------|-----------------|----------------|
 | 登录、退出、查看自己的账户信息 | ✅ | ✅ |
-| 使用设备、监控、日用品、重点待办、AI 工作台 | ✅ | ✅ |
-| 在设备页隐藏/恢复设备、自由排序、调节已声明能力的空调温度 | ✅ | ✅ |
+| 使用日用品、重点待办、AI 工作台 | ✅ | ✅ |
 | 查看或调用 `/api/setup/*` 系统配置 | ❌ | ✅ |
 | 查看用户列表、新增/禁用/删除用户、重置密码 | ❌ | ✅ |
 | 创建另一个管理员 | ❌ | ✅ |
@@ -996,7 +1018,7 @@ CREATE TABLE IF NOT EXISTS ai_audit (
 - 未登录访问面板业务 API 返回中文 `401`；普通用户访问管理员 API 返回中文 `403`。
 - 普通用户右上角“三个点”菜单只显示「退出登录」；管理员菜单显示「系统设置」「退出登录」。
 - 普通用户不渲染设置 Tab；直接请求或构造管理员 URL 仍必须被后端拒绝。
-- 管理员权限覆盖现有全部 `/api/setup/*`，包括米家凭据、设备 YAML、LLM、SMTP、应用配置及测试接口。
+- 管理员权限覆盖现有全部 `/api/setup/*`，包括 LLM、SMTP、Brave 及测试接口。
 
 ### 9.2 首个管理员与登录流程
 
@@ -1102,7 +1124,9 @@ DELETE /api/admin/users/{id}          # 管理员：删除用户并废止会话
 
 ---
 
-## 待办 10：设备页内管理、全局自由排序与空调温控 — **已完成**
+## 待办 10（已废弃）：设备页内管理、全局自由排序与空调温控
+
+> 米家设备模块已整体移除，本待办已废弃。
 
 **完成情况（2026-07-17）**：设备控制页已取消类型强制分组和管理弹窗，改为单一全局顺序网格；管理模式可在当前页隐藏/恢复，并支持桌面拖动和移动端长按拖动。`device_preferences` 新增 `sort_order`，完整顺序由事务更新，隐藏设备保留原位置。空调只有在 YAML 显式声明温控能力后才显示目标温度、加减和选择控件；WiFi 命令、查询属性及云端 MIOT `siid/piid` 均做白名单/显式校验，越界或步长错误不下发。普通设备列表仅返回安全展示字段，不再返回 token、host、did 或协议参数。
 
