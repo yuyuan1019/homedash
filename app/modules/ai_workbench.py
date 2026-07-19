@@ -15,8 +15,13 @@ from app.modules import ai_executor, items, todos
 
 router = APIRouter()
 WRITE_OPS = {"item.purchase", "item.usage", "item.set_stock", "item.create", "item.update", "todo.create", "todo.complete", "todo.reopen", "todo.update", "todo.delete"}
-QUERY_OPS = {"query.need_buy", "query.items", "query.open_todos", "query.overdue_todos"}
+QUERY_OPS = {"query.need_buy", "query.items", "query.open_todos", "query.overdue_todos", "query.placements"}
 ALL_OPS = WRITE_OPS | QUERY_OPS
+# 聊天工具 manage_item/manage_todo 的 action → 内部 op 映射；_execute_tool 与 chat 审计共用，避免两处漂移
+TOOL_ITEM_OPS = {"purchase": "item.purchase", "usage": "item.usage", "set_stock": "item.set_stock",
+                 "create": "item.create", "update": "item.update"}
+TOOL_TODO_OPS = {"create": "todo.create", "complete": "todo.complete", "reopen": "todo.reopen",
+                 "update": "todo.update", "delete": "todo.delete"}
 
 
 class ParseIn(BaseModel):
@@ -164,12 +169,13 @@ QUERY_HOME_TOOL = {
     "type": "function",
     "function": {
         "name": "query_home",
-        "description": "查询家庭数据：查看需要购买的物品(need_buy)、搜索物品(items)、查看未完成待办(open_todos)、查看过期待办(overdue_todos)。用户问有什么要买的/查库存/待办情况时必须用此工具。",
+        "description": "查询家庭数据：查看需要购买的物品(need_buy)、搜索物品(items)、查看未完成待办(open_todos)、查看过期待办(overdue_todos)、搜索收纳记录(placements)。用户问有什么要买的/查库存/待办情况/「X 放哪了」时必须用此工具。",
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["need_buy", "items", "open_todos", "overdue_todos"]},
+                "action": {"type": "string", "enum": ["need_buy", "items", "open_todos", "overdue_todos", "placements"]},
                 "name": {"type": "string", "description": "物品名称关键词，仅 action=items 时使用"},
+                "keyword": {"type": "string", "description": "搜索关键词，action=placements 时按描述/位置搜索收纳记录"},
             },
             "required": ["action"],
         },
@@ -218,9 +224,7 @@ async def _execute_tool(db, func_name: str, args: dict) -> str:
 
     if func_name == "manage_item":
         action = args.get("action", "")
-        op_map = {"purchase": "item.purchase", "usage": "item.usage", "set_stock": "item.set_stock",
-                   "create": "item.create", "update": "item.update"}
-        op = op_map.get(action)
+        op = TOOL_ITEM_OPS.get(action)
         if not op:
             return f"不支持的操作: {action}"
         try:
@@ -232,9 +236,7 @@ async def _execute_tool(db, func_name: str, args: dict) -> str:
 
     if func_name == "manage_todo":
         action = args.get("action", "")
-        op_map = {"create": "todo.create", "complete": "todo.complete", "reopen": "todo.reopen",
-                   "update": "todo.update", "delete": "todo.delete"}
-        op = op_map.get(action)
+        op = TOOL_TODO_OPS.get(action)
         if not op:
             return f"不支持的操作: {action}"
         if action == "delete" and not isinstance(args.get("todo_id"), int):
@@ -249,13 +251,16 @@ async def _execute_tool(db, func_name: str, args: dict) -> str:
     if func_name == "query_home":
         action = args.get("action", "")
         op_map = {"need_buy": "query.need_buy", "items": "query.items",
-                   "open_todos": "query.open_todos", "overdue_todos": "query.overdue_todos"}
+                   "open_todos": "query.open_todos", "overdue_todos": "query.overdue_todos",
+                   "placements": "query.placements"}
         op = op_map.get(action)
         if not op:
             return f"不支持的查询: {action}"
         q_action = {"op": op}
         if action == "items" and args.get("name"):
             q_action["name"] = args["name"]
+        if action == "placements" and args.get("keyword"):
+            q_action["keyword"] = args["keyword"]
         result = await _query(db, q_action)
         return json.dumps(result, ensure_ascii=False)
 
@@ -374,16 +379,22 @@ def _response_json(response: httpx.Response) -> dict:
     return data
 
 
-async def _chat_completion(client: httpx.AsyncClient, base_url: str, api_key: str, body: dict, max_retries: int = 2) -> httpx.Response:
-    """调用 LLM API，支持重试。默认最多重试2次（共3次尝试）"""
+async def _chat_completion(client: httpx.AsyncClient, base_url: str, api_key: str, body: dict, max_retries: int = 2, json_mode: bool = True) -> httpx.Response:
+    """调用 LLM API，支持重试。默认最多重试2次（共3次尝试）。
+
+    json_mode=True 强制 response_format=json_object（上游 400 不支持时回退一次）；
+    json_mode=False 不带该参数--适用于推理模型在长输出下用 json_object 会触发上游 500 的场景，
+    由调用方在 prompt 里要求只输出 JSON，并用 _loads_json_object 容错解析。
+    """
     headers = {"Authorization": f"Bearer {api_key}"}
     with_json = {**body, "response_format": {"type": "json_object"}}
+    effective = with_json if json_mode else body
 
     last_exception = None
     for attempt in range(max_retries + 1):
         try:
-            response = await client.post(f"{base_url}/chat/completions", headers=headers, json=with_json)
-            if response.status_code == 400 and "response_format" in response.text:
+            response = await client.post(f"{base_url}/chat/completions", headers=headers, json=effective)
+            if json_mode and response.status_code == 400 and "response_format" in response.text:
                 response = await client.post(f"{base_url}/chat/completions", headers=headers, json=body)
 
             # 成功或客户端错误（4xx）不重试
@@ -423,7 +434,24 @@ async def _snapshot(db) -> dict:
     cur = await db.execute("SELECT id,name,unit,current_stock,category,location,expires_at FROM items ORDER BY id LIMIT 80")
     item_rows = [dict(row) for row in await cur.fetchall()]
     todo_rows = await todos.list_open_todos(db, 30)
-    return {"items": item_rows, "todos_open": [{key: todo[key] for key in ("id", "title", "priority", "due_date")} for todo in todo_rows]}
+    # 收纳档案：最近 20 条已确认的，给聊天上下文用（回答「X 放哪了」）
+    pcur = await db.execute(
+        "SELECT id, description, location, item_ids, created_at FROM placements "
+        "WHERE confirmed=1 ORDER BY id DESC LIMIT 20"
+    )
+    placements_rows = []
+    for row in await pcur.fetchall():
+        d = dict(row)
+        try:
+            d["item_ids"] = json.loads(d.get("item_ids") or "[]")
+        except json.JSONDecodeError:
+            d["item_ids"] = []
+        placements_rows.append(d)
+    return {
+        "items": item_rows,
+        "todos_open": [{key: todo[key] for key in ("id", "title", "priority", "due_date")} for todo in todo_rows],
+        "placements": placements_rows,
+    }
 
 
 async def _query(db, action: dict):
@@ -439,6 +467,16 @@ async def _query(db, action: dict):
     if op == "query.items":
         keyword = str(action.get("name", ""))
         cur = await db.execute("SELECT * FROM items WHERE name LIKE ? ORDER BY id LIMIT 20", (f"%{keyword}%",))
+        return [dict(row) for row in await cur.fetchall()]
+    if op == "query.placements":
+        # 收纳记录检索：按描述/位置模糊匹配，仅返回已确认的（待确认的不算定案）
+        keyword = str(action.get("keyword", ""))
+        cur = await db.execute(
+            "SELECT id, description, location, item_ids, confirmed, created_at FROM placements "
+            "WHERE confirmed=1 AND (description LIKE ? OR location LIKE ?) "
+            "ORDER BY id DESC LIMIT 20",
+            (f"%{keyword}%", f"%{keyword}%"),
+        )
         return [dict(row) for row in await cur.fetchall()]
     open_todos = await todos.list_open_todos(db, 50)
     return [todo for todo in open_todos if op != "query.overdue_todos" or todo["overdue"]]
@@ -571,7 +609,7 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
         "你是 HomeDash 家庭管理助手，一个友好、简洁的中文助手。你可以：\n"
         "- 操作库存：购买入库、消耗使用、盘点、新建/修改物品（用 manage_item 工具）\n"
         "- 管理待办：新建、完成、重开、修改、删除待办（用 manage_todo 工具）\n"
-        "- 查询数据：查看需购清单、搜索物品、查看待办状态（用 query_home 工具）\n"
+        "- 查询数据：查看需购清单、搜索物品、查看待办、搜收纳记录回答「X 放哪了」（用 query_home 工具）\n"
         "- 解答家庭物品管理、库存预测、家务收纳等问题\n"
         + ("- 搜索网络获取实时信息：天气、新闻、百科等（用 brave_web_search 工具）\n" if brave_available else "")
         + "用户说加/买/入库/用了/消耗/盘点/新建物品/新建待办/完成待办等指令时，请调用对应工具执行。"
@@ -595,6 +633,12 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
     final_reply = ""
     max_turns = 5
     action_count = 0
+    # 累计本次对话的所有写操作，结束时写一条带 before/after 的汇总审计（对齐 apply()），
+    # 避免「每个工具调用一条空审计」让溯源里堆出大量空白记录。
+    chat_actions: list[dict] = []
+    chat_results: list[dict | None] = []
+    chat_before: list[dict] = []
+    chat_after: list[dict] = []
     max_actions = _max_actions()
     max_retries = 2  # 每次 LLM 调用最多重试 2 次（共 3 次尝试）
     try:
@@ -651,23 +695,31 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
                             args = json.loads(args_str) if isinstance(args_str, str) else args_str
                         except json.JSONDecodeError:
                             args = {}
+                        is_write = func_name in ("manage_item", "manage_todo")
+                        # _snapshot_target 只看 op 前缀（item./todo.）决定查哪张表；op 放最后确保前缀不被 args 覆盖
+                        snap_action = ({**args, "op": "item." if func_name == "manage_item" else "todo."}
+                                       if is_write else None)
+                        before = await _snapshot_target(db, snap_action) if is_write else None
                         result_text = await _execute_tool(db, func_name, args)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.get("id", ""),
                             "content": result_text,
                         })
-                        # 审计写操作
-                        if func_name in ("manage_item", "manage_todo"):
+                        # 累计写操作的 before/after 快照，结束后统一写一条汇总审计（不再逐条写空审计）
+                        if is_write:
                             action_count += 1
+                            tool_ops = TOOL_ITEM_OPS if func_name == "manage_item" else TOOL_TODO_OPS
+                            op = tool_ops.get(args.get("action", ""))
                             try:
                                 result_obj = json.loads(result_text) if result_text.startswith("{") else None
                             except json.JSONDecodeError:
                                 result_obj = None
-                            await _safe_audit(db, raw_text=payload.text, ok=True, stage="chat",
-                                              session_id=payload.session_id, llm_model=model,
-                                              actions=[{"tool": func_name, **args}],
-                                              results=[result_obj] if result_obj else None)
+                            # 记录真实 op，使这条汇总行可被撤回（_revert_action 依赖 action["op"]）
+                            chat_actions.append({**args, "op": op, "tool": func_name})
+                            chat_results.append(result_obj)
+                            chat_before.append(before)
+                            chat_after.append(await _snapshot_target(db, snap_action, result_obj))
                     continue
 
                 content = msg.get("content", "")
@@ -680,9 +732,13 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
         err = str(exc) or exc.__class__.__name__
+        # 中途异常也不丢已执行写操作的溯源：带上累计的 before/after
         await _safe_audit(db, raw_text=payload.text, ok=False, stage="chat",
                           session_id=payload.session_id, llm_model=model,
-                          duration_ms=duration_ms, error=err)
+                          duration_ms=duration_ms, error=err,
+                          actions=chat_actions or None, results=chat_results or None,
+                          before_json=_dumps(chat_before) if chat_before else None,
+                          after_json=_dumps(chat_after) if chat_after else None)
         if isinstance(exc, ValueError):
             raise HTTPException(502, str(exc)) from exc
         raise HTTPException(502, "模型调用失败，请检查 LLM 配置或稍后重试") from exc
@@ -693,7 +749,10 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
     duration_ms = int((time.perf_counter() - started) * 1000)
     await _safe_audit(db, raw_text=payload.text, ok=True, stage="chat",
                       session_id=payload.session_id, llm_model=model,
-                      llm_reply=final_reply, duration_ms=duration_ms)
+                      llm_reply=final_reply, duration_ms=duration_ms,
+                      actions=chat_actions or None, results=chat_results or None,
+                      before_json=_dumps(chat_before) if chat_before else None,
+                      after_json=_dumps(chat_after) if chat_after else None)
     return {"ok": True, "reply": final_reply, "session_id": payload.session_id}
 
 
@@ -843,10 +902,14 @@ async def _revert_action(db, action: dict, result: dict) -> None:
 
 @router.get("/ai/audit")
 async def audit(limit: int = 20, offset: int = 0, db=Depends(get_db)):
-    count_cur = await db.execute("SELECT COUNT(*) FROM ai_audit")
+    # 过滤历史遗留的「每个工具调用一条空审计」记录（stage=chat 且无任何汇总字段）；
+    # 新版 chat 已改为只写一条带 before/after 的汇总行，不再产生这类空记录。
+    where = ("WHERE NOT (stage='chat' AND llm_reply IS NULL AND before_json IS NULL "
+             "AND after_json IS NULL AND error IS NULL)")
+    count_cur = await db.execute(f"SELECT COUNT(*) FROM ai_audit {where}")
     total = (await count_cur.fetchone())[0]
     cur = await db.execute(
-        "SELECT * FROM ai_audit ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM ai_audit {where} ORDER BY id DESC LIMIT ? OFFSET ?",
         (max(1, min(limit, 100)), max(0, offset)),
     )
     rows = [dict(row) for row in await cur.fetchall()]
