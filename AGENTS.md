@@ -149,16 +149,18 @@ python -m app.modules.setup
 
 | 模块文件 | 状态 | 职责 |
 |----------|------|------|
-| `app/modules/items.py` | ✅ | 日用品 + EWMA / 安全库存预测 |
-| `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API + 图片附件（最多 5 张，10MB/张） |
+| `app/modules/items.py` | ✅ | 日用品 + EWMA / 安全库存预测 + 多图 + 表单下拉（分类/单位/地点 facets） |
+| `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API + 图片附件（图片原语共享 `image_store`） |
+| `app/modules/placements.py` | ✅ | 收纳知识库：记录「放到哪」+ LLM 关联库存物品候选 + 图片；供 AI 检索 |
+| `app/modules/image_store.py` | ✅ | 共享图片原语：sniff/save/unlink/decode + 进程级 images_lock（items/todos/placements 共用） |
 | `app/modules/notify.py` | ✅ | SMTP 周报（库存 + 重点待办）；支持热加载配置 |
-| `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、字段归一、全流程审计；家庭顾问聊天可选 Brave Search；支持物品分类预测、操作撤回、建议快捷片段 |
+| `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、字段归一、全流程审计；家庭顾问聊天可选 Brave Search；query.placements + placements 快照；操作撤回、分类预测、建议片段 |
 | `app/modules/ai_executor.py` | ✅ | 白名单写库；`_item_name` 归一 name/item_name；记录前后快照 |
 | `app/modules/setup.py` | ✅ | 配置状态、LLM / SMTP / Brave / Agent Token 配置读写与测试；支持热加载 |
-| `app/modules/travel.py` | ✅ | 旅游计划 CRUD；结合 Brave 天气资料与系统 LLM 生成可编辑行李清单 |
+| `app/modules/travel.py` | ✅ | 旅游计划 CRUD；结合 Brave 天气资料与系统 LLM 生成可编辑行李清单；行李编辑器常用物品快捷添加 |
 | `app/modules/auth.py` | ✅ | 首个管理员、scrypt 密码、180 天长期会话、面板 API 鉴权依赖 |
 | `app/modules/users.py` | ✅ | 管理员用户 CRUD、角色边界、重置密码与会话废止 |
-| `app/database.py` | ✅ | 单例 DB；业务表 + `users` / `auth_sessions`；`_ensure_columns` 给旧库补列 |
+| `app/database.py` | ✅ | 单例 DB；业务表（含 `items.images` / `placements`）+ `users` / `auth_sessions`；`_ensure_columns` 给旧库补列 |
 | `app/static/*` | ✅ 三 Tab | 浅色：AI 工作台、日用品、重点待办、设置 |
 
 ## 架构要点（非看文件不可知）

@@ -18,11 +18,12 @@
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| 日用品库存 | ✅ 已实现 | CRUD + 消耗/购买 + EWMA 预测 + 安全库存 + 购物清单 |
+| 日用品库存 | ✅ 已实现 | CRUD + 消耗/购买 + EWMA 预测 + 安全库存 + 购物清单 + 多图 + 表单下拉 |
+| 收纳知识库 | ✅ 已实现 | 记录「东西放到哪」（描述+照片），LLM 关联库存物品，AI 工作台可检索 |
 | 重点待办 | ✅ 已实现 | 家庭 to-do + home agent 提醒接口 |
 | SMTP 周报 | ✅ 已实现 | QQ 邮箱发送待办 + 需购买周报 |
-| AI 工作台 | ✅ 已实现 | 自然语言 → 白名单动作预览 → 确认写库 |
-| 旅游计划 | ✅ 已实现 | 保存行程；结合天气资料由 LLM 生成可编辑、可勾选的行李清单 |
+| AI 工作台 | ✅ 已实现 | 自然语言 → 工具调用写库 + 操作溯源（带前后快照）+ 撤回；可查收纳记录 |
+| 旅游计划 | ✅ 已实现 | 保存行程；结合天气资料由 LLM 生成可编辑、可勾选的行李清单；常用物品快捷添加 |
 | 面板登录与用户管理 | ✅ 已实现 | 180 天长期会话、普通用户/管理员、管理员专属系统设置 |
 
 ### 1. 日用品管理（已实现）
@@ -373,6 +374,9 @@ python -m app.modules.setup        # LLM / SMTP / Brave 配置读写与掩码
 | POST | `/api/items/{id}/purchase` | 购买（加库存） |
 | GET | `/api/items/{id}/history` | 历史 |
 | GET | `/api/items/predictions` | 需买 / 充足汇总 |
+| GET | `/api/items/facets` | 表单下拉候选：分类/单位/地点（按频次）+ 默认值 |
+| POST | `/api/items/{id}/images` | 上传物品图片（JPG/PNG/GIF/WebP，最多 5 张，每张 10MB） |
+| GET / DELETE | `/api/items/{id}/images/{image_id}` | 读取或移除物品图片 |
 | GET | `/api/todos?status=open\|done\|all` | 重点待办列表 |
 | POST | `/api/todos` | 新建重点待办 |
 | GET / PUT / DELETE | `/api/todos/{id}` | 查看、编辑、删除重点待办 |
@@ -382,6 +386,12 @@ python -m app.modules.setup        # LLM / SMTP / Brave 配置读写与掩码
 | POST / PUT | `/api/agent/todos/*/remind-fired`、`/remind` | agent 回写提醒或修改提醒 |
 | POST | `/api/todos/{id}/images` | 上传待办图片（JPG/PNG/GIF/WebP，最多 5 张，每张 10MB） |
 | GET / DELETE | `/api/todos/{id}/images/{image_id}` | 读取或移除待办图片 |
+| GET / POST | `/api/placements` | 收纳记录列表（?confirmed=all\|pending\|confirmed）/ 新建（描述+位置+备注） |
+| GET / PATCH / DELETE | `/api/placements/{id}` | 查看、修改、删除收纳记录 |
+| POST | `/api/placements/{id}/images` | 上传收纳照片（最多 5 张，每张 10MB） |
+| GET / DELETE | `/api/placements/{id}/images/{image_id}` | 读取或移除收纳照片 |
+| POST | `/api/placements/{id}/suggest` | LLM 关联库存物品候选（AI 未配置返回 503） |
+| PUT | `/api/placements/{id}/confirm` | 确认关联（item_ids + 可选位置） |
 | GET / POST | `/api/notify/config`、`/test`、`/weekly` | SMTP 配置状态、试发、周报 |
 | POST | `/api/ai/parse`、`/apply` | AI 解析预览、确认写入 |
 | POST | `/api/ai/chat` | 家庭顾问聊天（可选联网搜索） |

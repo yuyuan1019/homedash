@@ -1244,6 +1244,53 @@ Content-Type: application/json
 
 ---
 
+## 待办 12：物品多图与共享图片基础设施 — **已完成**
+
+**完成情况（2026-07-19）：** 抽 `app/modules/image_store.py`（sniff/save/unlink/decode/images_lock），todos 迁移复用；items 加 `images` 列 + 3 个图片端点（上传/读取/删除，最多 5 张/10MB）+ 删除清文件；列表回 `has_images`、详情回 `images`。前端复用 `showImagePreview` 放大浏览器，物品表单支持选择/粘贴上传、保存后上传（失败可重试）、详情缩略图、列表 📷 标记。
+
+**验收：** 上传/粘贴/删除/详情放大（item + todo 回归）；列表不渲染缩略图只 📷；`python -m app.modules.{image_store,items,todos}` 自检通过。
+
+**明确不做：** 图片压缩/水印/EXIF、图片字节进 LLM、列表渲染缩略图、重命名 `.todo-image-*` CSS 类（作 legacy 共用）。
+
+---
+
+## 待办 13：收纳知识库（placements）— **已完成**
+
+**完成情况（2026-07-19）：** 新增 `placements` 表（description/location/images/candidate_items/item_ids/confirmed）+ `app/modules/placements.py`（CRUD + 图片端点 + `/suggest` LLM 关联候选 + 自检）。日用品 Tab 加「📍 记录收纳」入口：描述主导表单 + 可选照片 → 保存 → LLM 给候选 → 候选确认弹窗（勾选+confidence+位置+手动搜物品）→ 确认。AI 工作台 `_snapshot` 注入最近 20 条已确认 placements + 新增 `query.placements` 工具（按描述/位置 LIKE 检索）。
+
+**验收：** 记一条「猫粮塞阳台柜」→ `/suggest`（AI 未配置返 503 仍可手动选）→ 勾选确认 → chat 问「猫粮放哪了」命中；`python -m app.modules.placements` 自检通过。
+
+**明确不做：** 图片传 LLM（仅人眼对照）、placements 提醒/周报、多用户协作、OCR、FTS/向量检索（只用 LIKE）、独立列表视图（v1 靠 AI chat 检索）。
+
+---
+
+## 待办 14：物品表单动态下拉（分类/单位/存放地点）— **已完成**
+
+**完成情况（2026-07-19）：** 新增 `GET /api/items/facets`（注册在 `/items/{id}` 前），返回分类/单位/地点（按使用频次降序）+ 默认值。前端 `showItemForm` 改 async 拉取并渲染三个 `<datalist>`，CRUD 后失效缓存。
+
+**验收：** 空库显示默认分类/单位；新建用新分类后下次开表单该分类靠前；自由输入非列表值仍可保存。
+
+**明确不做：** 分类 CRUD 管理界面、别名/同义词、强制选下拉值（保留 free-type）。
+
+---
+
+## 待办 15：旅游行李编辑器美化 + 常用物品快捷添加 — **已完成**
+
+**完成情况（2026-07-19）：** `showPackingEditor` 重写：顶部按分类的常用物品 chip（证件/衣物/洗护/电子/药品/其他，如内衣、充电宝、身份证…），点击即加入清单且防重复（已加置灰）；编辑行放宽、对齐。
+
+**验收：** 点 chip 立即出现一行且可编辑；重复点不叠加；保存正确落库。
+
+**明确不做：** 物品图库/云端模板、拖拽排序。
+
+---
+
+## 修复（2026-07-19，非 DEVPLAN 待办，随本轮提交）
+
+- **AI 操作溯源空记录**：`/ai/chat` 原来每个工具调用写一条几乎空的审计（N 个物品 → N+1 条）；改为循环累计 before/after（`_snapshot_target`）、结束写一条带 `actions/results/before_json/after_json` 的汇总行（对齐 `apply()`），并提取 `TOOL_ITEM_OPS/TOOL_TODO_OPS` 共享映射使该行可撤回；`GET /ai/audit` 过滤历史遗留的空 chat 行。
+- **啤酒等物品误报紧急**：单条消耗记录不再被当作「一天用完」虚高日均速率（改用品类先验/最低库存兜底）；「紧急」红标只在库存 ≤ 最低库存时出现，库存高于最低值最多显示「偏低」。
+
+---
+
 ## 待办 5：README / AGENTS 状态同步
 
 每次完成上面任一待办，同步更新：
