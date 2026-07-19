@@ -5,6 +5,8 @@ __pycache__/
 *.pyc
 data/homedash.db
 data/todo_images/
+data/item_images/
+data/placement_images/
 data/llm_config.json
 data/notify_config.json
 data/brave_config.json

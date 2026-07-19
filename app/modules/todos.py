@@ -13,6 +13,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.modules import image_store
 
 router = APIRouter()
 
@@ -20,14 +21,8 @@ _PRIORITIES = {"high", "medium", "low"}
 _STATUSES = {"open", "done"}
 _REPEATS = {"none", "once", "daily", "weekly"}
 _PRIORITY_SQL = "CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END"
-_IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}
-_EXT_TO_TYPE = {ext: ctype for ctype, ext in _IMAGE_TYPES.items()}
+# 图片原语（sniff/save/unlink/decode/lock）已抽到 app.modules.image_store，本模块只保留自己的图片目录
 _TODO_IMAGES_DIR = Path("data/todo_images")
-_MAX_IMAGES_PER_TODO = 5
-_MAX_IMAGE_SIZE = 10 * 1024 * 1024
-# 串行化 todos.images 列的读-改-写：单连接 aiosqlite 只串行单条语句，
-# 无法覆盖「读 images → 写文件 → 整列覆写」之间的 await 间隙。
-_IMAGES_LOCK = asyncio.Lock()
 
 
 class TodoIn(BaseModel):
@@ -113,35 +108,10 @@ def _decode_channels(raw: str | None) -> list[str]:
     return [str(channel) for channel in channels] if isinstance(channels, list) else []
 
 
-def _decode_images(raw: str | None) -> list[dict]:
-    if not raw:
-        return []
-    try:
-        images = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(images, list):
-        return []
-    return [image for image in images if isinstance(image, dict) and image.get("id") and image.get("filename")]
-
-
-def _sniff_image(data: bytes) -> str | None:
-    """按文件头判定真实图片类型并返回扩展名；不信任客户端声明的 content_type。"""
-    if data.startswith(b"\xff\xd8\xff"):
-        return ".jpg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ".png"
-    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
-        return ".gif"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return ".webp"
-    return None
-
-
 def _todo_dict(row) -> dict:
     item = dict(row)
     item["remind_channels"] = _decode_channels(item["remind_channels"])
-    item["images"] = _decode_images(item.get("images"))
+    item["images"] = image_store.decode_images(item.get("images"))
     item["overdue"] = (
         item["status"] == "open"
         and bool(item["due_date"])
@@ -238,77 +208,30 @@ async def _set_status(db, todo_id: int, status: str) -> dict:
     return _todo_dict(await _get_todo(db, todo_id))
 
 
-async def _safe_unlink(path: Path) -> None:
-    """best-effort 删除：吞 OSError（Windows 文件被占用等），不掩盖业务异常、不阻断流程。"""
-    try:
-        await asyncio.to_thread(path.unlink, missing_ok=True)
-    except OSError:
-        pass
-
-
 async def delete_todo_record(db, todo_id: int) -> None:
     # 与 upload/delete_image 共用同一把锁：整行删除也属 images 变更，
     # 串行化后并发上传不会把文件写到「正在被删的待办」上。
-    async with _IMAGES_LOCK:
+    async with image_store.images_lock():
         todo = _todo_dict(await _get_todo(db, todo_id))
         await db.execute("DELETE FROM todos WHERE id=?", (todo_id,))
         await db.commit()
     # DB 已提交后，文件删除只能 best-effort：Windows 下文件被占用会抛 PermissionError，
     # 吞掉避免「待办已删却返回 500」；孤儿文件可接受，不应阻断删除。
     for image in todo["images"]:
-        await _safe_unlink(_TODO_IMAGES_DIR / image["filename"])
-
-
-async def _save_upload(upload: UploadFile, path: Path) -> str:
-    """流式写盘并在写入过程中校验大小与真实图片类型，返回 sniff 出的扩展名。
-
-    全程不把整张图缓存进内存；任意失败（含 open 处的取消、超大、非图片、IO 错）都清掉半成品文件。
-    """
-    file = None
-    extension: str | None = None
-    try:
-        file = await asyncio.to_thread(path.open, "wb")
-        total = 0
-        while chunk := await upload.read(1024 * 1024):
-            if extension is None:
-                extension = _sniff_image(chunk)
-                if not extension:
-                    raise HTTPException(400, "仅支持 JPG、PNG、GIF 或 WebP 图片")
-            total += len(chunk)
-            if total > _MAX_IMAGE_SIZE:
-                raise HTTPException(400, "单张图片不能超过 10MB")
-            await asyncio.to_thread(file.write, chunk)
-    except BaseException:
-        # close 与 unlink 各自兜底：一个失败不能掩盖原始业务异常或跳过另一个。
-        if file is not None:
-            try:
-                await asyncio.to_thread(file.close)
-            except OSError:
-                pass
-        await _safe_unlink(path)
-        raise
-    try:
-        await asyncio.to_thread(file.close)
-    except OSError:
-        pass
-    if extension is None:
-        # 空上传：没有数据块进入循环
-        await _safe_unlink(path)
-        raise HTTPException(400, "图片内容为空")
-    return extension
+        await image_store.safe_unlink(_TODO_IMAGES_DIR / image["filename"])
 
 
 @router.post("/todos/{todo_id}/images")
 async def upload_todo_image(todo_id: int, image: UploadFile = File(...), db=Depends(get_db)):
     await _get_todo(db, todo_id)  # 404 if missing
     content_type = (image.content_type or "").lower()
-    if content_type not in _IMAGE_TYPES:
+    if content_type not in image_store.IMAGE_TYPES:
         raise HTTPException(400, "仅支持 JPG、PNG、GIF 或 WebP 图片")
     await asyncio.to_thread(_TODO_IMAGES_DIR.mkdir, parents=True, exist_ok=True)
     image_id = uuid4().hex
     # 先落盘到临时名，sniff 出真实扩展名后再 rename；文件名唯一，不与并发冲突。
     tmp_path = _TODO_IMAGES_DIR / f"{todo_id}_{image_id}.upload"
-    extension = await _save_upload(image, tmp_path)
+    extension = await image_store.save_upload(image, tmp_path)
     final_filename = f"{todo_id}_{image_id}{extension}"
     final_path = _TODO_IMAGES_DIR / final_filename
     committed = False
@@ -318,14 +241,14 @@ async def upload_todo_image(todo_id: int, image: UploadFile = File(...), db=Depe
             try:
                 await asyncio.to_thread(tmp_path.rename, final_path)
             except OSError:
-                await _safe_unlink(tmp_path)
+                await image_store.safe_unlink(tmp_path)
                 raise HTTPException(400, "图片保存失败，请重试")
         # 锁内做 images 列的读-改-写，避免并发覆写丢图。
-        async with _IMAGES_LOCK:
+        async with image_store.images_lock():
             todo = _todo_dict(await _get_todo(db, todo_id))
-            if len(todo["images"]) >= _MAX_IMAGES_PER_TODO:
-                raise HTTPException(400, f"每个待办最多上传 {_MAX_IMAGES_PER_TODO} 张图片")
-            images = [*todo["images"], {"id": image_id, "filename": final_filename, "content_type": _EXT_TO_TYPE[extension]}]
+            if len(todo["images"]) >= image_store.MAX_IMAGES_PER_ROW:
+                raise HTTPException(400, f"每个待办最多上传 {image_store.MAX_IMAGES_PER_ROW} 张图片")
+            images = [*todo["images"], {"id": image_id, "filename": final_filename, "content_type": image_store.EXT_TO_TYPE[extension]}]
             await db.execute("UPDATE todos SET images=?, updated_at=? WHERE id=?", (json.dumps(images, ensure_ascii=False), datetime.now().isoformat(timespec="seconds"), todo_id))
             await db.commit()
             committed = True
@@ -333,7 +256,7 @@ async def upload_todo_image(todo_id: int, image: UploadFile = File(...), db=Depe
         # 仅在尚未提交时回收文件：commit 成功后即便客户端断连(CancelledError)也不删，
         # 否则会删掉 DB 已引用的文件造成悬空 404。
         if not committed:
-            await _safe_unlink(final_path)
+            await image_store.safe_unlink(final_path)
         raise
     return _todo_dict(await _get_todo(db, todo_id))
 
@@ -344,7 +267,7 @@ async def get_todo_image(todo_id: int, image_id: str, db=Depends(get_db)):
     row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "待办不存在")
-    image = next((item for item in _decode_images(row["images"]) if item["id"] == image_id), None)
+    image = next((item for item in image_store.decode_images(row["images"]) if item["id"] == image_id), None)
     if not image:
         raise HTTPException(404, "图片不存在")
     path = _TODO_IMAGES_DIR / image["filename"]
@@ -366,7 +289,7 @@ async def get_todo_image(todo_id: int, image_id: str, db=Depends(get_db)):
 
 @router.delete("/todos/{todo_id}/images/{image_id}")
 async def delete_todo_image(todo_id: int, image_id: str, db=Depends(get_db)):
-    async with _IMAGES_LOCK:
+    async with image_store.images_lock():
         todo = _todo_dict(await _get_todo(db, todo_id))
         image = next((item for item in todo["images"] if item["id"] == image_id), None)
         if not image:
@@ -377,7 +300,7 @@ async def delete_todo_image(todo_id: int, image_id: str, db=Depends(get_db)):
         filename = image["filename"]
         updated = _todo_dict(await _get_todo(db, todo_id))
     # DB 已提交，文件删除 best-effort（同 delete_todo_record）。
-    await _safe_unlink(_TODO_IMAGES_DIR / filename)
+    await image_store.safe_unlink(_TODO_IMAGES_DIR / filename)
     return updated
 
 
@@ -530,14 +453,7 @@ async def remind_fired(todo_id: int, payload: RemindFiredIn, db=Depends(get_db))
 if __name__ == "__main__":
     assert _decode_channels('["qq", "wechat"]') == ["qq", "wechat"]
     assert _decode_channels("invalid") == []
-    assert _decode_images('[{"id":"image-1","filename":"test.png"}]')[0]["id"] == "image-1"
-    assert _decode_images("invalid") == []
-    assert _sniff_image(b"\xff\xd8\xff\xe0") == ".jpg"
-    assert _sniff_image(b"\x89PNG\r\n\x1a\n") == ".png"
-    assert _sniff_image(b"GIF89a") == ".gif"
-    assert _sniff_image(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == ".webp"
-    assert _sniff_image(b"<html><script>x</script>") is None
-    assert _EXT_TO_TYPE[".png"] == "image/png"
+    # 图片 sniff/decode/ext-map 的断言已随原语迁到 app.modules.image_store 自检
     sample = {
         "title": "换净水器滤芯",
         "priority": "high",
