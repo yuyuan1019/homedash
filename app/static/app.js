@@ -32,6 +32,8 @@ const API = {
   setupBraveConfig: '/api/setup/brave/config',
   setupBraveSave: '/api/setup/brave/save',
   setupBraveTest: '/api/setup/brave/test',
+  setupAgentConfig: '/api/setup/agent/config',
+  setupAgentSave: '/api/setup/agent/save',
   setupNotifyConfig: '/api/setup/notify/config',
   setupNotifySave: '/api/setup/notify/save',
   setupNotifyTest: '/api/setup/notify/test',
@@ -1512,6 +1514,18 @@ function renderSetup() {
     </details>
 
     <details class="card">
+      <summary class="section-title">Agent Token（可选）</summary>
+      <div class="setup-help">配置后，外部 AI agent（如 Hermes）可通过 <code>X-HomeDash-Token</code> 请求头调用 <code>/api/agent/todos/*</code> 接口。不配置时接口无需鉴权，仅限内网使用。</div>
+      <form id="setup-agent-form" class="setup-form">
+        <div class="form-group"><label>Agent Token</label><input type="password" id="agent-token" placeholder="自定义随机字符串"></div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">保存</button>
+        </div>
+        <div id="agent-result" class="setup-result"></div>
+      </form>
+    </details>
+
+    <details class="card">
       <summary class="section-title">SMTP 周报配置</summary>
       <div class="setup-help">保存后写入 <code>data/notify_config.json</code> 并立即生效。QQ 邮箱需使用 SMTP 授权码，不是网页登录密码。</div>
       <form id="setup-notify-form" class="setup-form">
@@ -1545,6 +1559,7 @@ function renderSetup() {
   bindSetupEvents();
   loadLlmConfig();
   loadBraveConfig();
+  loadAgentConfig();
   loadNotifyConfig();
   loadUsers();
 }
@@ -1555,6 +1570,7 @@ function bindSetupEvents() {
   document.getElementById('llm-models-btn').addEventListener('click', loadLlmModels);
   document.getElementById('setup-brave-form').addEventListener('submit', saveBraveConfig);
   document.getElementById('brave-test-only-btn').addEventListener('click', testBraveConfig);
+  document.getElementById('setup-agent-form').addEventListener('submit', saveAgentConfig);
   document.getElementById('setup-notify-form').addEventListener('submit', saveNotifyConfig);
   document.getElementById('notify-test-only-btn').addEventListener('click', testNotifyConfig);
   document.getElementById('notify-send-test-btn').addEventListener('click', sendTestNotify);
@@ -1770,6 +1786,27 @@ async function testBraveConfig() {
   const { ok, data } = await fetchJSON(API.setupBraveTest, { method: 'POST', body: JSON.stringify(payload) });
   resultBox.textContent = data?.message || (ok ? '连接正常' : '连接失败');
   resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
+}
+
+async function loadAgentConfig() {
+  const { ok, data } = await fetchJSON(API.setupAgentConfig);
+  if (!ok || !data) return;
+  document.getElementById('agent-token').value = data.token || '';
+}
+
+async function saveAgentConfig(e) {
+  e.preventDefault();
+  const payload = { token: document.getElementById('agent-token').value.trim() };
+  const { ok, data } = await fetchJSON(API.setupAgentSave, { method: 'POST', body: JSON.stringify(payload) });
+  const resultBox = document.getElementById('agent-result');
+  if (!ok) {
+    resultBox.textContent = data?.detail || '保存失败';
+    resultBox.className = 'setup-result error';
+    return;
+  }
+  resultBox.textContent = data.message || '保存成功';
+  resultBox.className = 'setup-result success';
+  await refreshSetupOverview();
 }
 
 async function loadNotifyConfig() {

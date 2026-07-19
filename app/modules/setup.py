@@ -16,6 +16,7 @@ DATA_DIR = "data"
 LLM_CONFIG_FILE = os.path.join(DATA_DIR, "llm_config.json")
 NOTIFY_CONFIG_FILE = os.path.join(DATA_DIR, "notify_config.json")
 BRAVE_CONFIG_FILE = os.path.join(DATA_DIR, "brave_config.json")
+AGENT_CONFIG_FILE = os.path.join(DATA_DIR, "agent_config.json")
 
 
 class LlmConfigIn(BaseModel):
@@ -43,6 +44,32 @@ class NotifyConfigIn(BaseModel):
 
 class BraveConfigIn(BaseModel):
     api_key: str = ""
+
+
+class AgentConfigIn(BaseModel):
+    token: str = ""
+
+
+def _agent_file_config() -> dict | None:
+    """读取 data/agent_config.json"""
+    if not os.path.isfile(AGENT_CONFIG_FILE):
+        return None
+    try:
+        with open(AGENT_CONFIG_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _agent_token() -> str:
+    """获取 Agent Token：环境变量优先，其次文件配置"""
+    env_token = os.getenv("AGENT_API_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    cfg = _agent_file_config()
+    if cfg and cfg.get("token"):
+        return str(cfg["token"]).strip()
+    return ""
 
 
 def _mask(value: str | None, head: int = 4, tail: int = 4) -> str:
@@ -342,7 +369,7 @@ async def setup_status():
     llm_configured = llm_cfg is not None
     smtp_configured = _notify_configured()
     brave_configured = _brave_configured()
-    agent_token = os.getenv("AGENT_API_TOKEN", "")
+    agent_token = _agent_token()
 
     missing = []
     if not llm_configured:
@@ -428,6 +455,30 @@ async def test_brave_config(payload: BraveConfigIn):
         return {"ok": False, "message": "API Key 不能为空"}
     ok, message = await _test_brave_connection(api_key)
     return {"ok": ok, "message": message}
+
+
+@router.get("/setup/agent/config")
+async def get_agent_config():
+    """获取 Agent Token 配置状态"""
+    env_token = os.getenv("AGENT_API_TOKEN", "").strip()
+    file_cfg = _agent_file_config()
+    token = _agent_token()
+    return {
+        "token": _mask(token) if token else "",
+        "configured": bool(token),
+        "source": "env" if env_token else "file" if file_cfg else "none",
+    }
+
+
+@router.post("/setup/agent/save")
+async def save_agent_config(payload: AgentConfigIn):
+    """保存 Agent Token 配置到文件"""
+    token = payload.token.strip()
+    if token:
+        _write_json(AGENT_CONFIG_FILE, {"token": token})
+    elif os.path.isfile(AGENT_CONFIG_FILE):
+        os.remove(AGENT_CONFIG_FILE)
+    return {"ok": True, "configured": bool(token)}
 
 
 @router.get("/setup/notify/config")

@@ -385,7 +385,8 @@ async def _verify_agent_token(
     x_homedash_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> None:
-    token = os.getenv("AGENT_API_TOKEN", "")
+    from app.modules.setup import _agent_token
+    token = _agent_token()
     if not token:
         return
     bearer = authorization.removeprefix("Bearer ") if authorization else ""

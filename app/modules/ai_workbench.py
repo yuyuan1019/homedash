@@ -1,4 +1,5 @@
 """AI 工作台：OpenAI-compatible 解析、白名单校验、审计。"""
+import asyncio
 import json
 import math
 import os
@@ -373,12 +374,38 @@ def _response_json(response: httpx.Response) -> dict:
     return data
 
 
-async def _chat_completion(client: httpx.AsyncClient, base_url: str, api_key: str, body: dict) -> httpx.Response:
+async def _chat_completion(client: httpx.AsyncClient, base_url: str, api_key: str, body: dict, max_retries: int = 2) -> httpx.Response:
+    """调用 LLM API，支持重试。默认最多重试2次（共3次尝试）"""
     headers = {"Authorization": f"Bearer {api_key}"}
     with_json = {**body, "response_format": {"type": "json_object"}}
-    response = await client.post(f"{base_url}/chat/completions", headers=headers, json=with_json)
-    if response.status_code == 400 and "response_format" in response.text:
-        response = await client.post(f"{base_url}/chat/completions", headers=headers, json=body)
+
+    last_exception = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.post(f"{base_url}/chat/completions", headers=headers, json=with_json)
+            if response.status_code == 400 and "response_format" in response.text:
+                response = await client.post(f"{base_url}/chat/completions", headers=headers, json=body)
+
+            # 成功或客户端错误（4xx）不重试
+            if response.status_code < 500:
+                return response
+
+            # 5xx 服务器错误，记录并重试
+            last_exception = Exception(f"Server error {response.status_code}")
+            if attempt < max_retries:
+                await asyncio.sleep(0.5 * (attempt + 1))  # 递增延迟
+                continue
+            return response
+
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            last_exception = exc
+            if attempt < max_retries:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+
+    if last_exception:
+        raise last_exception
     return response
 
 
@@ -569,16 +596,40 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
     max_turns = 5
     action_count = 0
     max_actions = _max_actions()
+    max_retries = 2  # 每次 LLM 调用最多重试 2 次（共 3 次尝试）
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:
             headers = {"Authorization": f"Bearer {api_key}"}
             for _ in range(max_turns):
                 body: dict = {"model": model, "messages": messages, "tools": tools}
-                response = await client.post(
-                    f"{base_url}/chat/completions",
-                    headers=headers,
-                    json=body,
-                )
+                # 重试逻辑：针对 5xx 服务器错误和网络异常
+                response = None
+                last_exc = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        response = await client.post(
+                            f"{base_url}/chat/completions",
+                            headers=headers,
+                            json=body,
+                        )
+                        # 成功或客户端错误（4xx）不重试
+                        if response.status_code < 500:
+                            break
+                        # 5xx 服务器错误，重试
+                        last_exc = Exception(f"Server error {response.status_code}")
+                        if attempt < max_retries:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                            continue
+                    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                        last_exc = exc
+                        if attempt < max_retries:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                            continue
+                        raise
+                if response is None:
+                    if last_exc:
+                        raise last_exc
+                    raise HTTPException(502, "模型调用失败，请检查 LLM 配置或稍后重试")
                 if response.status_code >= 400:
                     raise HTTPException(502, _llm_error_message(response.status_code))
                 data = _response_json(response)

@@ -11,11 +11,24 @@ from app.database import get_db
 
 router = APIRouter()
 
-TARGET_DAYS = 30          # 建议购买数量覆盖的目标周期
+TARGET_DAYS = 30          # 默认建议购买数量覆盖的目标周期
 BUY_THRESHOLD = 7         # 少于该天数则标记需要购买
 EWMA_ALPHA = 0.35         # 近期消耗记录的权重
 LEAD_DAYS = 3             # 网购到货缓冲天数
 MIN_USAGE_FOR_EWMA = 2    # 至少两条记录才按区间速率计算 EWMA
+
+# 根据物品类别智能调整建议购买天数
+CATEGORY_TARGET_DAYS = {
+    "食品": 7,              # 鸡蛋、面包等易腐食品，建议7天量
+    "生鲜": 7,              # 新鲜食材，建议7天量
+    "冷冻": 14,             # 冷冻食品，建议14天量
+    "饮料": 14,             # 啤酒、饮料等，建议14天量
+    "速食": 14,             # 方便面等，建议14天量
+    "纸品": 30,             # 卫生纸、抽纸等，建议30天量
+    "洗护": 30,             # 洗发水、沐浴露等，建议30天量
+    "清洁": 30,             # 清洁用品，建议30天量
+    "宠物": 30,             # 宠物用品，建议30天量
+}
 
 # ponytail: 两口之家冷启动粗略先验，真实 usage 达到三条后完全由 EWMA 覆盖。
 CATEGORY_PRIORS = {
@@ -24,6 +37,10 @@ CATEGORY_PRIORS = {
     "清洁": 0.05,
     "宠物": 0.05,
     "冷冻": 0.1,
+    "食品": 0.5,           # 食品类消耗较快
+    "生鲜": 0.3,           # 生鲜消耗适中
+    "饮料": 0.2,           # 饮料消耗适中
+    "速食": 0.1,           # 速食消耗较慢
 }
 
 
@@ -131,7 +148,10 @@ def predict_item(logs: list[dict], current_stock: float,
         or current_stock < safety_stock
         or (days_until_empty is not None and days_until_empty < BUY_THRESHOLD)
     )
-    suggested_qty = max(0, math.ceil(daily_rate * TARGET_DAYS - current_stock)) if need_buy else 0
+
+    # 根据类别智能调整建议购买天数
+    target_days = CATEGORY_TARGET_DAYS.get(category, TARGET_DAYS)
+    suggested_qty = max(0, math.ceil(daily_rate * target_days - current_stock)) if need_buy else 0
 
     if usage_count >= 6:
         confidence = "high"
