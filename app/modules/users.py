@@ -1,6 +1,6 @@
 """管理员用户管理：新增、角色/状态、重置密码与删除。"""
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -27,7 +27,8 @@ class PasswordResetIn(BaseModel):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    # 统一用容器本地时区（TZ，默认 Asia/Shanghai），与库存/待办及前端展示一致
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _validate_role(role: str) -> str:

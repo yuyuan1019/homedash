@@ -829,7 +829,7 @@ async def _revert_action(db, action: dict, result: dict) -> None:
     elif op == "todo.reopen":
         todo_id = result.get("todo_id")
         if todo_id:
-            await db.execute("UPDATE todos SET status='done', completed_at=datetime('now') WHERE id=?", (todo_id,))
+            await db.execute("UPDATE todos SET status='done', completed_at=datetime('now', 'localtime') WHERE id=?", (todo_id,))
     elif op == "todo.delete":
         # 删除的待办无法安全恢复，跳过
         pass

@@ -14,13 +14,13 @@ CREATE TABLE IF NOT EXISTS items (
     min_stock REAL DEFAULT 1,
     location TEXT,
     expires_at TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE TABLE IF NOT EXISTS usage_logs (
     id INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL,
     amount REAL NOT NULL,
-    logged_at TEXT DEFAULT (datetime('now')),
+    logged_at TEXT DEFAULT (datetime('now', 'localtime')),
     note TEXT,
     FOREIGN KEY (item_id) REFERENCES items(id)
 );
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS purchase_logs (
     item_id INTEGER NOT NULL,
     amount REAL NOT NULL,
     price REAL,
-    purchased_at TEXT DEFAULT (datetime('now')),
+    purchased_at TEXT DEFAULT (datetime('now', 'localtime')),
     note TEXT,
     FOREIGN KEY (item_id) REFERENCES items(id)
 );
@@ -46,9 +46,9 @@ CREATE TABLE IF NOT EXISTS todos (
     remind_repeat TEXT,
     external_ref TEXT,
     images TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
     completed_at TEXT,
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE TABLE IF NOT EXISTS ai_audit (
     id INTEGER PRIMARY KEY,
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS ai_audit (
     before_json TEXT,
     after_json TEXT,
     reverted INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -75,16 +75,16 @@ CREATE TABLE IF NOT EXISTS users (
     password_salt TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user',
     enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
     last_login_at TEXT
 );
 CREATE TABLE IF NOT EXISTS auth_sessions (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
-    created_at TEXT DEFAULT (datetime('now')),
-    last_seen_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    last_seen_at TEXT DEFAULT (datetime('now', 'localtime')),
     expires_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );

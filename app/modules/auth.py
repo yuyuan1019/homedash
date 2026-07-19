@@ -4,7 +4,7 @@ import base64
 import hashlib
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -26,7 +26,8 @@ class CredentialsIn(BaseModel):
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    # 统一用容器本地时区（TZ，默认 Asia/Shanghai）；会话写入与比较同源，展示字段也与前端一致
+    return datetime.now()
 
 
 def _iso(value: datetime) -> str:

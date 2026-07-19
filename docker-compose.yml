@@ -5,6 +5,9 @@ services:
       - "${HOMEDASH_PORT:-8088}:8000"
     env_file:
       - .env
+    environment:
+      # 容器默认 UTC，显式设为上海时区，使 datetime.now() 等本地时间与前端展示一致
+      - TZ=${TZ:-Asia/Shanghai}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
