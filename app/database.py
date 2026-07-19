@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS items (
     min_stock REAL DEFAULT 1,
     location TEXT,
     expires_at TEXT,
+    images TEXT,
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 CREATE TABLE IF NOT EXISTS usage_logs (
@@ -102,6 +103,20 @@ CREATE TABLE IF NOT EXISTS travel_plans (
     created_at TEXT DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
+CREATE TABLE IF NOT EXISTS placements (
+    id INTEGER PRIMARY KEY,
+    description TEXT NOT NULL,
+    location TEXT,
+    images TEXT,
+    candidate_items TEXT,
+    item_ids TEXT,
+    confirmed INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    confirmed_at TEXT,
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_placements_confirmed ON placements(confirmed, id DESC);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
 """
@@ -130,7 +145,7 @@ async def init_db() -> None:
     _db = await aiosqlite.connect(DB_PATH)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
-    await _ensure_columns(_db, "items", {"location": "TEXT", "expires_at": "TEXT"})
+    await _ensure_columns(_db, "items", {"location": "TEXT", "expires_at": "TEXT", "images": "TEXT"})
     await _ensure_columns(_db, "todos", {"images": "TEXT"})
     await _ensure_columns(_db, "ai_audit", {
         "stage": "TEXT", "session_id": "TEXT", "llm_model": "TEXT",

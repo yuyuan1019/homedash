@@ -1,15 +1,22 @@
-"""日用品管理：CRUD + 消耗/购买记录 + EWMA 预测。无 ORM。"""
+"""日用品管理：CRUD + 消耗/购买记录 + EWMA 预测 + 多图。无 ORM。"""
+import asyncio
+import json
 import math
 import statistics
 from datetime import datetime, date, timedelta
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, File, HTTPException, Depends, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
 
 from app.database import get_db
+from app.modules import image_store
 
 router = APIRouter()
+_ITEM_IMAGES_DIR = Path("data/item_images")
 
 TARGET_DAYS = 30          # 默认建议购买数量覆盖的目标周期
 BUY_THRESHOLD = 7         # 少于该天数则标记需要购买
@@ -42,6 +49,10 @@ CATEGORY_PRIORS = {
     "饮料": 0.2,           # 饮料消耗适中
     "速食": 0.1,           # 速食消耗较慢
 }
+
+# 表单下拉的冷启动默认值；与运行库去重值合并后供前端 datalist 使用
+DEFAULT_CATEGORIES = ("纸品", "洗护", "清洁", "厨房", "宠物", "冷冻", "药品", "其他")
+DEFAULT_UNITS = ("个", "瓶", "袋", "盒", "包", "卷", "提", "箱", "罐", "块", "kg", "L")
 
 
 class ItemIn(BaseModel):
@@ -125,11 +136,9 @@ def predict_item(logs: list[dict], current_stock: float,
         daily_rate = last_purchase["amount"] / interval_days
         days_until_empty = (last_purchase_date + timedelta(days=interval_days) - today).days
         method = "purchase_interval"
-    elif usage_count == 1:
-        # ponytail: 单条记录没有时间跨度，沿用原先按一天计算的保守兜底。
-        daily_rate = usage[0]["amount"]
-        method = "ewma"
-    elif usage_count == 0 and category in CATEGORY_PRIORS:
+    elif usage_count <= 1 and category in CATEGORY_PRIORS:
+        # 0 或 1 条消耗记录都算不出区间速率：用品类先验给一个保守消耗率，
+        # 不再把单笔记录的数量当作「一天消耗完」而虚高触发紧急补货。
         daily_rate = CATEGORY_PRIORS[category]
         method = "category_prior"
     elif min_stock > 0:
@@ -188,8 +197,15 @@ async def _load_purchases(db, item_id: int) -> list[dict]:
     return [dict(r) for r in await cur.fetchall()]
 
 
-async def _item_with_prediction(db, row) -> dict:
+async def _item_with_prediction(db, row, include_images: bool = True) -> dict:
     item = dict(row)
+    raw_images = item.pop("images", None)
+    # 列表只回 has_images 布尔（保持轻量、不泄露文件名）；详情回完整 images 数组
+    decoded = image_store.decode_images(raw_images)
+    if include_images:
+        item["images"] = decoded
+    else:
+        item["has_images"] = bool(decoded)
     logs = await _load_logs(db, item["id"])
     purchases = await _load_purchases(db, item["id"])
     item["prediction"] = predict_item(
@@ -273,7 +289,7 @@ async def all_predictions(db=Depends(get_db)):
     rows = await cur.fetchall()
     buy, ok = [], []
     for row in rows:
-        item = await _item_with_prediction(db, row)
+        item = await _item_with_prediction(db, row, include_images=False)
         (buy if item["prediction"]["need_buy"] else ok).append(item)
     buy.sort(key=lambda x: x["prediction"]["days_until_empty"] or 0)
     return {"need_buy": buy, "sufficient": ok}
@@ -282,12 +298,32 @@ async def all_predictions(db=Depends(get_db)):
 @router.get("/items")
 async def list_items(db=Depends(get_db)):
     cur = await db.execute("SELECT * FROM items ORDER BY id")
-    return [await _item_with_prediction(db, r) for r in await cur.fetchall()]
+    return [await _item_with_prediction(db, r, include_images=False) for r in await cur.fetchall()]
 
 
 @router.post("/items")
 async def create_item(payload: ItemIn, db=Depends(get_db)):
     return {"id": await create_item_record(db, payload.model_dump())}
+
+
+@router.get("/items/facets")
+async def item_facets(db=Depends(get_db)):
+    """表单下拉候选：分类/单位/存放地点（均按使用频次降序去重）+ 冷启动默认值。
+    必须注册在 `/items/{item_id}` 之前，否则 FastAPI 会把 "facets" 当 int 解析报 422。"""
+    async def _distinct(col: str) -> list[str]:
+        # col 是本函数内硬编码字面量，非用户输入，拼接安全
+        cur = await db.execute(
+            f"SELECT {col} AS v FROM items WHERE {col} IS NOT NULL AND {col} != '' "
+            f"GROUP BY {col} ORDER BY COUNT(*) DESC, {col} ASC"
+        )
+        return [row["v"] for row in await cur.fetchall()]
+
+    return {
+        "categories": await _distinct("category"),
+        "units": await _distinct("unit"),
+        "locations": await _distinct("location"),
+        "defaults": {"categories": list(DEFAULT_CATEGORIES), "units": list(DEFAULT_UNITS)},
+    }
 
 
 @router.get("/items/{item_id}")
@@ -313,11 +349,95 @@ async def update_item(item_id: int, payload: ItemPatch, db=Depends(get_db)):
 
 @router.delete("/items/{item_id}")
 async def delete_item(item_id: int, db=Depends(get_db)):
-    await db.execute("DELETE FROM usage_logs WHERE item_id=?", (item_id,))
-    await db.execute("DELETE FROM purchase_logs WHERE item_id=?", (item_id,))
-    await db.execute("DELETE FROM items WHERE id=?", (item_id,))
-    await db.commit()
+    async with image_store.images_lock():
+        row = await _get_item(db, item_id)
+        images = image_store.decode_images(row["images"]) if "images" in row.keys() else []
+        await db.execute("DELETE FROM usage_logs WHERE item_id=?", (item_id,))
+        await db.execute("DELETE FROM purchase_logs WHERE item_id=?", (item_id,))
+        await db.execute("DELETE FROM items WHERE id=?", (item_id,))
+        await db.commit()
+    # DB 已提交后文件删除 best-effort：不阻断删除（同 todos）
+    for image in images:
+        await image_store.safe_unlink(_ITEM_IMAGES_DIR / image["filename"])
     return {"deleted": item_id}
+
+
+@router.post("/items/{item_id}/images")
+async def upload_item_image(item_id: int, image: UploadFile = File(...), db=Depends(get_db)):
+    await _get_item(db, item_id)  # 404 if missing
+    content_type = (image.content_type or "").lower()
+    if content_type not in image_store.IMAGE_TYPES:
+        raise HTTPException(400, "仅支持 JPG、PNG、GIF 或 WebP 图片")
+    await asyncio.to_thread(_ITEM_IMAGES_DIR.mkdir, parents=True, exist_ok=True)
+    image_id = uuid4().hex
+    tmp_path = _ITEM_IMAGES_DIR / f"{item_id}_{image_id}.upload"
+    extension = await image_store.save_upload(image, tmp_path)
+    final_filename = f"{item_id}_{image_id}{extension}"
+    final_path = _ITEM_IMAGES_DIR / final_filename
+    committed = False
+    try:
+        if tmp_path != final_path:
+            try:
+                await asyncio.to_thread(tmp_path.rename, final_path)
+            except OSError:
+                await image_store.safe_unlink(tmp_path)
+                raise HTTPException(400, "图片保存失败，请重试")
+        # 锁内做 images 列的读-改-写，避免并发覆写丢图
+        async with image_store.images_lock():
+            row = await _get_item(db, item_id)
+            images = image_store.decode_images(row["images"]) if "images" in row.keys() else []
+            if len(images) >= image_store.MAX_IMAGES_PER_ROW:
+                raise HTTPException(400, f"每个物品最多上传 {image_store.MAX_IMAGES_PER_ROW} 张图片")
+            images = [*images, {"id": image_id, "filename": final_filename,
+                                "content_type": image_store.EXT_TO_TYPE[extension]}]
+            await db.execute("UPDATE items SET images=? WHERE id=?", (json.dumps(images, ensure_ascii=False), item_id))
+            await db.commit()
+            committed = True
+    except BaseException:
+        # 仅在尚未提交时回收文件：commit 成功后即便客户端断连也不删，避免悬空 404
+        if not committed:
+            await image_store.safe_unlink(final_path)
+        raise
+    return await _item_with_prediction(db, await _get_item(db, item_id))
+
+
+@router.get("/items/{item_id}/images/{image_id}")
+async def get_item_image(item_id: int, image_id: str, db=Depends(get_db)):
+    cur = await db.execute("SELECT images FROM items WHERE id=?", (item_id,))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "物品不存在")
+    image = next((i for i in image_store.decode_images(row["images"]) if i["id"] == image_id), None)
+    if not image:
+        raise HTTPException(404, "图片不存在")
+    path = _ITEM_IMAGES_DIR / image["filename"]
+    # 一次性读出全部字节再构造响应，避免 FileResponse 与并发删除之间的 TOCTOU（同 todos）
+    try:
+        data = await asyncio.to_thread(path.read_bytes)
+    except FileNotFoundError:
+        raise HTTPException(404, "图片文件不存在")
+    except OSError:
+        raise HTTPException(500, "读取图片失败")
+    return Response(content=data, media_type=image.get("content_type") or "application/octet-stream",
+                    headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"})
+
+
+@router.delete("/items/{item_id}/images/{image_id}")
+async def delete_item_image(item_id: int, image_id: str, db=Depends(get_db)):
+    async with image_store.images_lock():
+        row = await _get_item(db, item_id)
+        images = image_store.decode_images(row["images"]) if "images" in row.keys() else []
+        target = next((i for i in images if i["id"] == image_id), None)
+        if not target:
+            raise HTTPException(404, "图片不存在")
+        remaining = [i for i in images if i["id"] != image_id]
+        await db.execute("UPDATE items SET images=? WHERE id=?", (json.dumps(remaining, ensure_ascii=False), item_id))
+        await db.commit()
+        filename = target["filename"]
+        updated = await _item_with_prediction(db, await _get_item(db, item_id))
+    # DB 已提交，文件删除 best-effort（同 todos）
+    await image_store.safe_unlink(_ITEM_IMAGES_DIR / filename)
+    return updated
 
 
 @router.post("/items/{item_id}/usage")
@@ -400,5 +520,19 @@ if __name__ == "__main__":
     assert p6["method"] == "category_prior" and p6["daily_rate"] == 0.15, p6
     for field in ("daily_rate", "days_until_empty", "est_empty_date", "need_buy", "suggested_qty"):
         assert field in p6, p6
+
+    # 单条消耗记录不再被当作「一天消耗完」虚高速率：库存高于最低值时不应触发紧急
+    single = predict_item([{"logged_at": "2026-07-10", "amount": 5}], 5, today, category="饮料", min_stock=2)
+    assert single["method"] == "category_prior" and single["daily_rate"] == 0.2, single
+    assert single["need_buy"] is False, single  # 库存 5 > 最低 2：单条记录不应标红
+
+    # 表单下拉默认值齐备
+    assert len(DEFAULT_CATEGORIES) == 8 and "纸品" in DEFAULT_CATEGORIES
+    assert "个" in DEFAULT_UNITS
+
+    # 图片 decode 兼容旧库：images 列为 NULL/缺列/非法 JSON 时都返回空 list
+    assert image_store.decode_images(None) == []
+    assert image_store.decode_images("not json") == []
+    assert image_store.decode_images('[{"id":"i","filename":"a.png"}]')[0]["id"] == "i"
 
     print("items.py 自检通过：EWMA、安全库存与冷启动预测正确。")
