@@ -1284,6 +1284,16 @@ Content-Type: application/json
 
 ---
 
+## 待办 17：重点待办 — 卡片间距 + 标题/内容搜索 — **已完成**
+
+**完成情况（2026-07-20）：** 纯前端改动，零后端 / 零 DB 变更。`.todo-card` 上下 padding 与 `margin-bottom` 加大，卡片之间留白更明显；`renderTodos` 顶部 toolbar 新增搜索框，照抄 `placements` 候选弹窗的客户端筛选模式（`toLowerCase().includes()` + `input` 事件重渲染），按 `title` 或 `note` 即时过滤当前列表（复用 `todosCache`，不重复请求后端）。切换「未完成 / 已完成」时清空关键词。空列表区分「无待办」与「无匹配」两种文案。
+
+**验收：** 输入关键词即时过滤标题与备注、清空恢复全量；未完成↔已完成切换清空搜索；卡片间距明显加大；旅游/物品不受影响；后端模块自检无回归。
+
+**明确不做：** 不加后端 `?q=`（数据已全量在内存）；不改待办数据模型；不搜图片。
+
+---
+
 ## 修复（2026-07-19，非 DEVPLAN 待办，随本轮提交）
 
 - **AI 操作溯源空记录**：`/ai/chat` 原来每个工具调用写一条几乎空的审计（N 个物品 → N+1 条）；改为循环累计 before/after（`_snapshot_target`）、结束写一条带 `actions/results/before_json/after_json` 的汇总行（对齐 `apply()`），并提取 `TOOL_ITEM_OPS/TOOL_TODO_OPS` 共享映射使该行可撤回；`GET /ai/audit` 过滤历史遗留的空 chat 行。

@@ -150,7 +150,7 @@ python -m app.modules.setup
 | 模块文件 | 状态 | 职责 |
 |----------|------|------|
 | `app/modules/items.py` | ✅ | 日用品 + EWMA / 安全库存预测 + 多图 + 表单下拉（分类/单位/地点 facets） |
-| `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API + 图片附件（图片原语共享 `image_store`） |
+| `app/modules/todos.py` | ✅ | 重点待办 CRUD + agent API + 图片附件（图片原语共享 `image_store`）+ 列表即时搜索（客户端过滤） |
 | `app/modules/placements.py` | ✅ | 收纳知识库：记录「放到哪」+ LLM 关联库存物品候选 + 图片；供 AI 检索 |
 | `app/modules/image_store.py` | ✅ | 共享图片原语：sniff/save/unlink/decode + 进程级 images_lock（items/todos/placements 共用） |
 | `app/modules/notify.py` | ✅ | SMTP 周报（库存 + 重点待办）；支持热加载配置 |

@@ -44,6 +44,7 @@
 ### 2. 重点待办（已实现）
 
 - 独立「重点待办」Tab：新建、编辑、完成、重开、删除，支持优先级、截止日期、备注和图片附件（缩略图；可直接粘贴剪贴板图片）
+- 列表支持按标题或内容即时搜索（客户端过滤，无需后端），卡片间距已加大便于区分不同待办
 - 面板表单不展示负责人及提醒时间、频道、重复规则；既有 home agent 提醒接口继续保留，避免影响已接入的自动化
 - `home agent` 轮询 `/api/agent/todos/due`，转发服务端生成的中文 `message` 后调用 `remind-fired`；HomeDash 不实现 QQ/微信协议
 - `AGENT_API_TOKEN` 非空时，agent 路径必须带 `X-HomeDash-Token` 或 `Authorization: Bearer`；未配置仅适用于内网

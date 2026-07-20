@@ -55,6 +55,8 @@ const API = {
 
 let currentTab = 'ai';
 let todoStatus = 'open';
+let todoQuery = '';      // 待办即时搜索：按标题或内容过滤
+let todosCache = [];     // 当前已加载的待办，供搜索框重渲染时复用，避免重复请求
 let chatMessages = [];
 let setupStatusData = null;
 let itemCategoryTimer = null;
@@ -1029,22 +1031,33 @@ function renderTodoCard(todo) {
 
 function renderTodos(todos) {
   const container = document.getElementById('tab-todos');
-  const title = todoStatus === 'open' ? '暂无未完成重点待办' : '暂无已完成重点待办';
+  // 客户端即时搜索：按标题或内容（note）子串过滤，不区分大小写（照抄 placement-filter 模式）
+  const q = todoQuery.trim().toLowerCase();
+  const shown = q ? todos.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.note || '').toLowerCase().includes(q)) : todos;
+  const emptyTitle = todoStatus === 'open' ? '暂无未完成重点待办' : '暂无已完成重点待办';
+  const emptyMsg = !todos.length ? emptyTitle : '没有匹配的待办';
   container.innerHTML = `
     <div class="toolbar">
       <button class="btn btn-primary" id="add-todo-btn">+ 添加待办</button>
       <button class="btn ${todoStatus === 'open' ? 'btn-primary' : ''}" id="show-open-todos">未完成</button>
       <button class="btn ${todoStatus === 'done' ? 'btn-primary' : ''}" id="show-done-todos">已完成</button>
+      <input id="todo-search" class="todo-search" type="search" placeholder="搜索标题或内容…" value="${esc(todoQuery)}">
     </div>
-    ${todos.length ? `<div class="todo-list">${todos.map(renderTodoCard).join('')}</div>` : `<div class="empty-state">${title}</div>`}`;
+    ${shown.length ? `<div class="todo-list">${shown.map(renderTodoCard).join('')}</div>` : `<div class="empty-state">${emptyMsg}</div>`}`;
   document.getElementById('add-todo-btn').addEventListener('click', () => showTodoForm());
   document.getElementById('show-open-todos').addEventListener('click', () => {
     todoStatus = 'open';
+    todoQuery = '';  // 切换未完成/已完成时清空搜索，避免跨状态残留无效关键词
     loadTodos();
   });
   document.getElementById('show-done-todos').addEventListener('click', () => {
     todoStatus = 'done';
+    todoQuery = '';
     loadTodos();
+  });
+  document.getElementById('todo-search').addEventListener('input', (e) => {
+    todoQuery = e.target.value;
+    renderTodos(todosCache);  // 复用已加载数据即时重渲染，不重复请求后端
   });
   document.querySelectorAll('.todo-done').forEach((button) => {
     button.addEventListener('click', () => setTodoStatus(Number(button.dataset.id), true));
@@ -1079,7 +1092,8 @@ async function loadTodos() {
     container.innerHTML = `<div class="empty-state">待办加载失败：${data?.detail || '未知错误'}</div>`;
     return;
   }
-  renderTodos(data || []);
+  todosCache = data || [];  // 缓存当前列表，供搜索框 input 事件即时过滤重渲染
+  renderTodos(todosCache);
 }
 
 function todoImageUrl(todoId, imageId) { return `/api/todos/${todoId}/images/${encodeURIComponent(imageId)}`; }

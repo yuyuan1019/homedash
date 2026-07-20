@@ -340,14 +340,27 @@ main {
   display: flex;
   align-items: flex-start;
   gap: 0.7rem;
-  padding: 0.9rem 0.1rem;
+  padding: 1.05rem 0.1rem;
   border-bottom: 1px solid var(--line);
   border-radius: 8px;
-  margin-bottom: 0.3rem;
+  margin-bottom: 0.7rem;
   transition: background 0.2s;
 }
 
 .todo-card:last-child { border-bottom: none; }
+.todo-search {
+  flex: 1;
+  min-width: 140px;
+  max-width: 280px;
+  margin-left: auto;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 0.92rem;
+  background: var(--card);
+  color: var(--text);
+}
+.todo-search:focus { outline: none; border-color: var(--accent); }
 .todo-card.overdue .todo-title { color: #c43b3b; }
 .todo-card.done { opacity: 0.65; }
 .todo-card.done .todo-title { text-decoration: line-through; }
