@@ -1284,6 +1284,18 @@ Content-Type: application/json
 
 ---
 
+## 待办 16：旅游模块重设计 — 目的地推荐 + 非网红玩法 + 高德交通时长 — **已完成**
+
+**完成情况（2026-07-20）：** 新增 `POST /api/travel/suggest`（按出发城市/交通方式/主策略/标签/预算推荐小众、避开网红的真实目的地，每个含 why_not_viral 理由、非网红亮点、人均预算与交通时长）与 `POST /api/travel/plans/{id}/spots`（选定目的地后生成非网红具体玩法清单，可勾选）。`travel_plans` 经 `_ensure_columns` 补 `origin_city/transport_mode/budget_tier/strategy/tags/spots_json`。高德地图（REST + 配置 Key）做交通时长精确化：自驾用驾车路径规划（精确），高铁/飞机按直线距离估算；无 Key 整体降级为 LLM 估算，不阻断。前端旅游 Tab 重写为「发现目的地」+「我的行程」两区，候选卡片含交通时长徽章（高德精确=绿/估算=灰），一键加入行程预填偏好；修好原拥挤头部（`.section-header`/`.section-subtitle` 补样式）。`PlanIn` 扩展偏好字段，向后兼容旧库/旧调用。
+
+> 本待办在「旅游推荐」范围内引入高德交通时长，不与待办 11（行李功能）冲突；自驾精确、高铁/飞机为距离估算，精确时刻需 12306/航司数据（本期不做）。
+
+**验收：** `python -m app.modules.travel` / `python -m app.modules.setup` 自检通过；配 LLM 时 `/travel/suggest` 返回候选带交通时长；不配高德 Key 降级为 LLM 估算、应用正常启动；不配 LLM 时 `/suggest` 与 `/spots` 优雅 503；TestClient 端到端冒烟通过（bootstrap→login→suggest 503 / amap config 200）。
+
+**明确不做：** 机票/酒店预订、实时天气预警推送、12306/航司级精确高铁/航班时刻、地图瓦片可视化、推荐结果落库缓存。
+
+---
+
 ## 待办 17：重点待办 — 卡片间距 + 标题/内容搜索 — **已完成**
 
 **完成情况（2026-07-20）：** 纯前端改动，零后端 / 零 DB 变更。`.todo-card` 上下 padding 与 `margin-bottom` 加大，卡片之间留白更明显；`renderTodos` 顶部 toolbar 新增搜索框，照抄 `placements` 候选弹窗的客户端筛选模式（`toLowerCase().includes()` + `input` 事件重渲染），按 `title` 或 `note` 即时过滤当前列表（复用 `todosCache`，不重复请求后端）。切换「未完成 / 已完成」时清空关键词。空列表区分「无待办」与「无匹配」两种文案。

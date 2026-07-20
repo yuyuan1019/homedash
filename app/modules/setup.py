@@ -17,6 +17,7 @@ LLM_CONFIG_FILE = os.path.join(DATA_DIR, "llm_config.json")
 NOTIFY_CONFIG_FILE = os.path.join(DATA_DIR, "notify_config.json")
 BRAVE_CONFIG_FILE = os.path.join(DATA_DIR, "brave_config.json")
 AGENT_CONFIG_FILE = os.path.join(DATA_DIR, "agent_config.json")
+AMAP_CONFIG_FILE = os.path.join(DATA_DIR, "amap_config.json")
 
 
 class LlmConfigIn(BaseModel):
@@ -43,6 +44,10 @@ class NotifyConfigIn(BaseModel):
 
 
 class BraveConfigIn(BaseModel):
+    api_key: str = ""
+
+
+class AmapConfigIn(BaseModel):
     api_key: str = ""
 
 
@@ -146,6 +151,29 @@ def _brave_config() -> dict:
 
 def _brave_configured() -> bool:
     return bool(_brave_config().get("api_key"))
+
+
+def _amap_file_config() -> dict | None:
+    if not os.path.isfile(AMAP_CONFIG_FILE):
+        return None
+    try:
+        with open(AMAP_CONFIG_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _amap_config() -> dict:
+    """高德配置：环境变量 AMAP_API_KEY 优先，其次 data/amap_config.json。"""
+    env_key = os.getenv("AMAP_API_KEY", "").strip()
+    if env_key:
+        return {"api_key": env_key}
+    file_cfg = _amap_file_config() or {}
+    return {"api_key": file_cfg.get("api_key", "")}
+
+
+def _amap_configured() -> bool:
+    return bool(_amap_config().get("api_key"))
 
 
 def _notify_file_config() -> dict:
@@ -276,6 +304,28 @@ async def _test_brave_connection(api_key: str) -> tuple[bool, str]:
         return False, "Brave Search 连接失败，请检查网络"
 
 
+async def _test_amap_connection(api_key: str) -> tuple[bool, str]:
+    """用一次地理编码校验高德 Key（status 为字符串 '1' 且能解出坐标即有效）。"""
+    if not api_key:
+        return False, "高德 Key 未配置"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://restapi.amap.com/v3/geocode/geo",
+                params={"key": api_key, "address": "北京"},
+            )
+        if resp.status_code != 200:
+            return False, f"高德连接失败 (HTTP {resp.status_code})"
+        data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return False, "高德连接失败，请检查网络与 Key"
+    if str(data.get("status")) != "1":
+        info = data.get("info") or "Key 无效或配额问题"
+        return False, f"高德 Key 校验失败：{info}"
+    geocodes = data.get("geocodes") or []
+    return (True, "高德 Key 有效，地理编码正常") if geocodes else (False, "高德返回异常，未解析到坐标")
+
+
 async def _fetch_llm_models(cfg: dict) -> tuple[bool, str, list[str]]:
     try:
         async with httpx.AsyncClient(timeout=cfg["timeout_sec"]) as client:
@@ -346,6 +396,14 @@ def _merge_brave_payload(payload: BraveConfigIn) -> dict:
     return {"api_key": api_key}
 
 
+def _merge_amap_payload(payload: AmapConfigIn) -> dict:
+    current = _amap_config()
+    api_key = payload.api_key.strip()
+    if not api_key or _masked(api_key):
+        api_key = current.get("api_key", "")
+    return {"api_key": api_key}
+
+
 def _test_smtp_sync(cfg: dict) -> tuple[bool, str]:
     if not cfg["smtp_host"] or not cfg["smtp_user"] or not cfg["smtp_password"] or not cfg["notify_to"]:
         return False, "SMTP_HOST、SMTP_USER、SMTP_PASSWORD 和 NOTIFY_TO 必填"
@@ -369,6 +427,7 @@ async def setup_status():
     llm_configured = llm_cfg is not None
     smtp_configured = _notify_configured()
     brave_configured = _brave_configured()
+    amap_configured = _amap_configured()
     agent_token = _agent_token()
 
     missing = []
@@ -383,6 +442,7 @@ async def setup_status():
         "smtp_configured": smtp_configured,
         "agent_token_configured": bool(agent_token),
         "brave_configured": brave_configured,
+        "amap_configured": amap_configured,
         "missing": missing,
     }
 
@@ -457,6 +517,36 @@ async def test_brave_config(payload: BraveConfigIn):
     return {"ok": ok, "message": message}
 
 
+@router.get("/setup/amap/config")
+async def get_amap_config():
+    cfg = _amap_config()
+    api_key = cfg.get("api_key", "")
+    return {
+        "api_key": _mask(api_key) if api_key else "",
+        "source": "env" if os.getenv("AMAP_API_KEY", "").strip() else "file" if _amap_file_config() else "none",
+    }
+
+
+@router.post("/setup/amap/save")
+async def save_amap_config(payload: AmapConfigIn):
+    api_key = _merge_amap_payload(payload)["api_key"]
+    if api_key:
+        _write_json(AMAP_CONFIG_FILE, {"api_key": api_key})
+    elif os.path.isfile(AMAP_CONFIG_FILE):
+        os.remove(AMAP_CONFIG_FILE)
+    ok, message = await _test_amap_connection(api_key)
+    return {"ok": True, "tested": ok, "message": message if ok else f"保存成功，但{message}"}
+
+
+@router.post("/setup/amap/test")
+async def test_amap_config(payload: AmapConfigIn):
+    api_key = _merge_amap_payload(payload)["api_key"]
+    if not api_key:
+        return {"ok": False, "message": "高德 Key 不能为空"}
+    ok, message = await _test_amap_connection(api_key)
+    return {"ok": ok, "message": message}
+
+
 @router.get("/setup/agent/config")
 async def get_agent_config():
     """获取 Agent Token 配置状态"""
@@ -522,6 +612,9 @@ async def env_snippet():
     if not _brave_configured():
         lines.append("# Brave Search 联网搜索（可在设置页直接保存到 data/brave_config.json）：")
         lines.append("# BRAVE_API_KEY=")
+    if not _amap_configured():
+        lines.append("# 高德地图交通时长（旅游推荐用，可在设置页直接保存到 data/amap_config.json）：")
+        lines.append("# AMAP_API_KEY=")
     return {"snippet": "\n".join(lines)}
 
 
@@ -531,6 +624,7 @@ if __name__ == "__main__":
         LLM_CONFIG_FILE = os.path.join(tmp, "llm_config.json")
         NOTIFY_CONFIG_FILE = os.path.join(tmp, "notify_config.json")
         BRAVE_CONFIG_FILE = os.path.join(tmp, "brave_config.json")
+        AMAP_CONFIG_FILE = os.path.join(tmp, "amap_config.json")
 
         _write_json(LLM_CONFIG_FILE, {"base_url": "https://example.com/v1", "api_key": "sk-test", "model": "m", "timeout_sec": 10, "enabled": True, "confirm_required": True, "max_actions": 4})
         assert _llm_file_config()["model"] == "m"
@@ -538,9 +632,12 @@ if __name__ == "__main__":
         _write_json(NOTIFY_CONFIG_FILE, {"smtp_host": "smtp.example.com", "smtp_user": "u", "smtp_password": "p", "notify_to": "a@example.com"})
         assert _notify_configured()
 
+        _write_json(AMAP_CONFIG_FILE, {"api_key": "amap-test"})
+        assert _amap_file_config()["api_key"] == "amap-test"
+
         assert _mask("sk-abcdefgh1234") == "sk-a*******1234"
         assert _mask("") == ""
         assert _mask("short") == "*****"
         assert _masked("sk-****") is True
 
-    print("setup.py 自检通过：LLM / SMTP / Brave 配置读写与掩码逻辑正确。")
+    print("setup.py 自检通过：LLM / SMTP / Brave / 高德 配置读写与掩码逻辑正确。")

@@ -10,4 +10,6 @@ data/placement_images/
 data/llm_config.json
 data/notify_config.json
 data/brave_config.json
+data/amap_config.json
+data/agent_config.json
 .env

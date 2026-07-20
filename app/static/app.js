@@ -41,6 +41,9 @@ const API = {
   setupBraveConfig: '/api/setup/brave/config',
   setupBraveSave: '/api/setup/brave/save',
   setupBraveTest: '/api/setup/brave/test',
+  setupAmapConfig: '/api/setup/amap/config',
+  setupAmapSave: '/api/setup/amap/save',
+  setupAmapTest: '/api/setup/amap/test',
   setupAgentConfig: '/api/setup/agent/config',
   setupAgentSave: '/api/setup/agent/save',
   setupNotifyConfig: '/api/setup/notify/config',
@@ -51,6 +54,8 @@ const API = {
   travelPlan: (id) => `/api/travel/plans/${id}`,
   travelRecommend: (id) => `/api/travel/plans/${id}/recommend`,
   travelPacking: (id) => `/api/travel/plans/${id}/packing`,
+  travelSuggest: '/api/travel/suggest',
+  travelSpots: (id) => `/api/travel/plans/${id}/spots`,
 };
 
 let currentTab = 'ai';
@@ -239,6 +244,12 @@ function initTabs() {
 // ============ 旅游计划 Tab ============
 
 let travelPlans = [];
+let discoverCache = null;  // { request:{...}, response:{strategy_note, source, candidates} } 缓存最近一次目的地推荐，跨列表刷新保留
+
+const TRANSPORT_OPTIONS = ['不限', '高铁', '自驾', '飞机'];
+const STRATEGY_OPTIONS = ['综合', '度假优先', '性价比优先', '不网红优先'];
+const BUDGET_OPTIONS = ['不限', '经济', '舒适'];
+const TRAVEL_TAG_OPTIONS = ['温泉', '海岛', '自然山水', '古镇', 'City Walk', '亲子', '美食', '徒步', '露营', '人文'];
 
 async function loadTravelPlans() {
   const container = document.getElementById('tab-travel');
@@ -252,38 +263,73 @@ async function loadTravelPlans() {
   }
   travelPlans = data || [];
   container.innerHTML = `
-    <div class="section-header"><div><h2>🧳 旅游计划</h2><p class="section-subtitle">结合目的地、日期和天气生成可编辑行李清单</p></div><button class="btn btn-primary" id="travel-add">＋ 新建行程</button></div>
-    <div class="travel-list">${travelPlans.length ? travelPlans.map(renderTravelCard).join('') : '<div class="empty">还没有行程，先创建一个旅游计划吧。</div>'}</div>`;
+    <div class="section-header"><div><h2>🧳 旅游计划</h2><p class="section-subtitle">发现小众目的地 · 规划行程 · 打包行李</p></div><div class="travel-header-actions"><button class="btn" id="travel-discover-btn">✨ 发现目的地</button><button class="btn btn-primary" id="travel-add">＋ 新建行程</button></div></div>
+    ${renderDiscoverPanel()}
+    <div class="section-mini-title">我的行程</div>
+    <div class="travel-list">${travelPlans.length ? travelPlans.map(renderTravelCard).join('') : '<div class="empty">还没有行程。点上方「✨ 发现目的地」让 AI 按交通方式推荐小众去处，或「＋ 新建行程」手动添加。</div>'}</div>`;
   document.getElementById('travel-add').addEventListener('click', () => showTravelForm());
+  document.getElementById('travel-discover-btn').addEventListener('click', () => {
+    const panel = document.getElementById('discover-panel');
+    if (panel) { panel.open = true; document.getElementById('dc-origin')?.focus(); }
+  });
+  bindDiscoverEvents();
   container.querySelectorAll('[data-travel-action]').forEach((btn) => btn.addEventListener('click', () => handleTravelAction(btn.dataset.travelAction, Number(btn.dataset.id))));
   container.querySelectorAll('.packing-check').forEach((box) => box.addEventListener('change', () => togglePacked(Number(box.dataset.id), Number(box.dataset.index), box.checked)));
+  container.querySelectorAll('.spot-check').forEach((box) => box.addEventListener('change', () => toggleSpotBooked(Number(box.dataset.id), Number(box.dataset.index), box.checked)));
 }
 
 function renderTravelCard(plan) {
   const items = plan.packing_items || [];
   const packed = items.filter((item) => item.packed).length;
+  const spots = plan.spots || [];
+  const spotBooked = spots.filter((s) => s.booked).length;
+  const prefs = [];
+  if (plan.origin_city) prefs.push(`从 ${plan.origin_city} 出发`);
+  if (plan.transport_mode) prefs.push(plan.transport_mode);
+  if (plan.strategy) prefs.push(plan.strategy);
+  const prefBadges = prefs.map((x) => `<span class="badge badge-outline">${esc(x)}</span>`).join('');
+  const tagBadges = (plan.tags || []).map((t) => `<span class="badge badge-outline">${esc(t)}</span>`).join('');
   return `<article class="travel-card">
-    <div class="travel-card-head"><div><h3>${esc(plan.destination)}</h3><div class="item-meta">${esc(plan.start_date)} 至 ${esc(plan.end_date)} · ${plan.travelers} 人${plan.activities ? ` · ${esc(plan.activities)}` : ''}</div></div>
+    <div class="travel-card-head"><div><h3>${esc(plan.destination)}</h3><div class="item-meta">${esc(plan.start_date)} 至 ${esc(plan.end_date)} · ${plan.travelers} 人${plan.activities ? ` · ${esc(plan.activities)}` : ''}</div>${(prefBadges || tagBadges) ? `<div class="travel-prefs">${prefBadges}${tagBadges}</div>` : ''}</div>
       <div class="travel-actions"><button class="btn btn-small" data-travel-action="edit" data-id="${plan.id}">编辑</button><button class="btn btn-small btn-danger" data-travel-action="delete" data-id="${plan.id}">删除</button></div></div>
     ${plan.notes ? `<div class="travel-notes muted">📝 ${esc(plan.notes)}</div>` : ''}
-    ${plan.weather_summary ? `<div class="weather-summary"><b>天气参考：</b>${esc(plan.weather_summary)}<span class="badge badge-outline">${esc(plan.weather_source || '')}</span></div>` : '<div class="weather-summary muted">尚未生成天气与行李建议</div>'}
-    <div class="packing-head"><b>行李清单 ${items.length ? `${packed}/${items.length}` : ''}</b><div><button class="btn btn-small" data-travel-action="packing" data-id="${plan.id}">${items.length ? '编辑清单' : '手动添加'}</button> <button class="btn btn-primary btn-small" data-travel-action="recommend" data-id="${plan.id}">${items.length ? '重新生成' : 'AI 生成建议'}</button></div></div>
+    ${plan.weather_summary ? `<div class="weather-summary"><b>天气参考：</b>${esc(plan.weather_summary)}<span class="badge badge-outline">${esc(plan.weather_source || '')}</span></div>` : ''}
+    <div class="packing-head"><b>🧳 行李清单 ${items.length ? `${packed}/${items.length}` : ''}</b><div><button class="btn btn-small" data-travel-action="packing" data-id="${plan.id}">${items.length ? '编辑清单' : '手动添加'}</button> <button class="btn btn-primary btn-small" data-travel-action="recommend" data-id="${plan.id}">${items.length ? '重新生成' : 'AI 生成建议'}</button></div></div>
     <div class="packing-list">${items.length ? items.map((item, index) => `<label class="packing-row ${item.packed ? 'packed' : ''}"><input class="packing-check" data-id="${plan.id}" data-index="${index}" type="checkbox" ${item.packed ? 'checked' : ''}><span><b>${esc(item.name)}</b> · ${esc(item.quantity)} <small>${esc(item.category)}${item.note ? ` · ${esc(item.note)}` : ''}</small></span></label>`).join('') : ''}</div>
+    <div class="packing-head"><b>🎯 推荐玩法 ${spots.length ? `${spotBooked}/${spots.length}` : ''}</b><div><button class="btn btn-small" data-travel-action="spots" data-id="${plan.id}">${spots.length ? '重新生成' : 'AI 生成玩法'}</button></div></div>
+    <div class="spots-list">${spots.length ? spots.map((s, i) => `<label class="spot-row ${s.booked ? 'booked' : ''}"><input class="spot-check" data-id="${plan.id}" data-index="${i}" type="checkbox" ${s.booked ? 'checked' : ''}><span><b>${esc(s.name)}</b> · ${esc(s.type || '景点')}${s.duration_hours != null ? ` · ${s.duration_hours}h` : ''}${s.cost ? ` · ${esc(s.cost)}` : ''}<small>${esc(s.why || '')}</small></span></label>`).join('') : ''}</div>
   </article>`;
 }
 
-function showTravelForm(plan = null) {
+function showTravelForm(plan = null, prefill = null) {
+  const p = plan || prefill || {};
+  const tagsStr = (plan?.tags || prefill?.tags || []).join(', ');
   showModal(`<div class="modal-content"><button class="close-btn">×</button><h2>${plan ? '编辑' : '新建'}旅游计划</h2><form id="travel-form">
-    <div class="form-group"><label>目的地</label><input id="travel-destination" required maxlength="100" value="${esc(plan?.destination || '')}" placeholder="例如：成都"></div>
-    <div class="form-row"><div class="form-group"><label>开始日期</label><input id="travel-start" type="date" required value="${esc(plan?.start_date || todayInput())}"></div><div class="form-group"><label>结束日期</label><input id="travel-end" type="date" required value="${esc(plan?.end_date || todayInput())}"></div></div>
-    <div class="form-group"><label>出行人数</label><input id="travel-people" type="number" min="1" max="30" required value="${plan?.travelers || 1}"></div>
-    <div class="form-group"><label>活动偏好</label><input id="travel-activities" maxlength="500" value="${esc(plan?.activities || '')}" placeholder="例如：徒步、美食、亲子"></div>
-    <div class="form-group"><label>补充备注</label><textarea id="travel-notes" maxlength="1000" placeholder="例如：带儿童、容易晕车">${esc(plan?.notes || '')}</textarea></div>
+    <div class="form-row"><div class="form-group"><label>目的地</label><input id="travel-destination" required maxlength="100" value="${esc(p.destination || '')}" placeholder="例如：成都"></div><div class="form-group"><label>出发城市</label><input id="travel-origin" maxlength="60" value="${esc(p.origin_city || '')}" placeholder="例如：成都"></div></div>
+    <div class="form-row"><div class="form-group"><label>开始日期</label><input id="travel-start" type="date" required value="${esc(p.start_date || todayInput())}"></div><div class="form-group"><label>结束日期</label><input id="travel-end" type="date" required value="${esc(p.end_date || todayInput())}"></div></div>
+    <div class="form-row"><div class="form-group"><label>出行人数</label><input id="travel-people" type="number" min="1" max="30" required value="${p.travelers || 1}"></div><div class="form-group"><label>交通方式</label><select id="travel-transport">${TRANSPORT_OPTIONS.map((o) => `<option ${o === (p.transport_mode || '') ? 'selected' : ''}>${o}</option>`).join('')}</select></div></div>
+    <div class="form-row"><div class="form-group"><label>主策略</label><select id="travel-strategy">${STRATEGY_OPTIONS.map((o) => `<option ${o === (p.strategy || '') ? 'selected' : ''}>${o}</option>`).join('')}</select></div><div class="form-group"><label>预算档</label><select id="travel-budget">${BUDGET_OPTIONS.map((o) => `<option ${o === (p.budget_tier || '') ? 'selected' : ''}>${o}</option>`).join('')}</select></div></div>
+    <div class="form-group"><label>偏好标签（逗号分隔）</label><input id="travel-tags" maxlength="120" value="${esc(tagsStr)}" placeholder="例如：温泉, 自然"></div>
+    <div class="form-group"><label>活动偏好</label><input id="travel-activities" maxlength="500" value="${esc(p.activities || '')}" placeholder="例如：徒步、美食、亲子"></div>
+    <div class="form-group"><label>补充备注</label><textarea id="travel-notes" maxlength="1000" placeholder="例如：带儿童、容易晕车">${esc(p.notes || '')}</textarea></div>
     <div class="modal-actions"><button type="button" class="btn modal-cancel">取消</button><button class="btn btn-primary" type="submit">保存</button></div></form></div>`);
   bindModalClose();
   document.getElementById('travel-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const payload = { destination: document.getElementById('travel-destination').value.trim(), start_date: document.getElementById('travel-start').value, end_date: document.getElementById('travel-end').value, travelers: Number(document.getElementById('travel-people').value), activities: document.getElementById('travel-activities').value.trim(), notes: document.getElementById('travel-notes').value.trim() };
+    const tags = document.getElementById('travel-tags').value.split(',').map((s) => s.trim()).filter(Boolean);
+    const payload = {
+      destination: document.getElementById('travel-destination').value.trim(),
+      origin_city: document.getElementById('travel-origin').value.trim(),
+      start_date: document.getElementById('travel-start').value,
+      end_date: document.getElementById('travel-end').value,
+      travelers: Number(document.getElementById('travel-people').value),
+      transport_mode: document.getElementById('travel-transport').value,
+      strategy: document.getElementById('travel-strategy').value,
+      budget_tier: document.getElementById('travel-budget').value,
+      tags,
+      activities: document.getElementById('travel-activities').value.trim(),
+      notes: document.getElementById('travel-notes').value.trim(),
+    };
     const { ok, data } = await fetchJSON(plan ? API.travelPlan(plan.id) : API.travelPlans, { method: plan ? 'PUT' : 'POST', body: JSON.stringify(payload) });
     if (!ok) { toast(detailMsg(data, '保存失败'), 'error'); return; }
     closeModal(); toast('旅游计划已保存', 'success'); loadTravelPlans();
@@ -295,6 +341,7 @@ async function handleTravelAction(action, id) {
   if (!plan) return;
   if (action === 'edit') return showTravelForm(plan);
   if (action === 'packing') return showPackingEditor(plan);
+  if (action === 'spots') return generateSpots(plan);
   if (action === 'delete') {
     if (!confirm(`确定删除“${plan.destination}”旅游计划吗？`)) return;
     const { ok, data } = await fetchJSON(API.travelPlan(id), { method: 'DELETE' });
@@ -391,6 +438,181 @@ async function togglePacked(id, index, checked) {
     toast(detailMsg(data, '更新失败'), 'error');
   }
   loadTravelPlans();  // 成功/失败都重新拉取，以服务端为准，避免缓存与库长期不一致
+}
+
+async function toggleSpotBooked(id, index, checked) {
+  const plan = travelPlans.find((item) => item.id === id);
+  if (!plan?.spots[index]) return;
+  plan.spots[index].booked = checked;
+  const { ok, data } = await fetchJSON(API.travelSpots(id), { method: 'PUT', body: JSON.stringify({ items: plan.spots }) });
+  if (!ok) {
+    plan.spots[index].booked = !checked;  // 回滚乐观更新
+    toast(detailMsg(data, '更新失败'), 'error');
+  }
+  loadTravelPlans();
+}
+
+async function generateSpots(plan) {
+  if ((plan.spots || []).length && !confirm('重新生成会替换当前玩法清单，已勾选的将按名称保留。确定继续吗？')) return;
+  // 推理模型生成约需 1 分钟：按钮显示已用秒数
+  const btn = document.querySelector(`[data-travel-action="spots"][data-id="${plan.id}"]`);
+  const originalText = btn?.textContent;
+  const startedAt = Date.now();
+  let ticker = null;
+  if (btn) {
+    btn.disabled = true;
+    const tick = () => { btn.textContent = `⏳ 生成中… ${Math.floor((Date.now() - startedAt) / 1000)}s`; };
+    tick();
+    ticker = setInterval(tick, 1000);
+  }
+  toast('正在生成非网红玩法清单，约需 1 分钟…');
+  try {
+    const { ok, data } = await fetchJSON(API.travelSpots(plan.id), { method: 'POST' });
+    if (!ok) return toast(detailMsg(data, '生成失败'), 'error');
+    toast('玩法清单已生成，可勾选已安排的项目', 'success');
+    return loadTravelPlans();
+  } catch {
+    toast('生成失败，请检查网络后重试', 'error');
+  } finally {
+    if (ticker) clearInterval(ticker);
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
+  }
+}
+
+// ============ 目的地推荐（发现目的地）============
+
+function renderDiscoverPanel() {
+  const req = discoverCache?.request || {};
+  const origin = req.origin_city || '';
+  const transport = req.transport_mode || '不限';
+  const strategy = req.strategy || '综合';
+  const budget = req.budget_tier || '不限';
+  const selTags = req.tags || [];
+  const resultsHtml = discoverCache?.response
+    ? renderDiscoverResults(discoverCache.response)
+    : '<div class="muted discover-hint">填好条件后点「AI 推荐目的地」。系统会按你的策略推荐小众、有度假感的目的地，并标注出发地到各候选的交通时长。</div>';
+  const opt = (arr, cur) => arr.map((o) => `<option ${o === cur ? 'selected' : ''}>${o}</option>`).join('');
+  return `<details class="card discover-card" id="discover-panel" ${discoverCache ? 'open' : ''}>
+    <summary class="section-title">✨ 发现目的地（按交通方式推荐 · 避开网红）</summary>
+    <div class="discover-form">
+      <div class="form-group"><label>出发城市</label><input id="dc-origin" value="${esc(origin)}" placeholder="例如：成都" maxlength="60"></div>
+      <div class="form-group"><label>交通方式</label><select id="dc-transport">${opt(TRANSPORT_OPTIONS, transport)}</select></div>
+      <div class="form-group"><label>天数</label><input id="dc-days" type="number" min="1" max="90" value="${req.days || 3}"></div>
+      <div class="form-group"><label>人数</label><input id="dc-people" type="number" min="1" max="30" value="${req.travelers || 2}"></div>
+      <div class="form-group"><label>主策略</label><select id="dc-strategy">${opt(STRATEGY_OPTIONS, strategy)}</select></div>
+      <div class="form-group"><label>预算档</label><select id="dc-budget">${opt(BUDGET_OPTIONS, budget)}</select></div>
+      <div class="form-group"><label>出行月份（可选）</label><input id="dc-month" type="number" min="1" max="12" value="${req.month || ''}"></div>
+    </div>
+    <div class="form-group"><label>偏好标签（可多选）</label><div class="tag-chips">${TRAVEL_TAG_OPTIONS.map((t) => `<button type="button" class="tag-chip ${selTags.includes(t) ? 'selected' : ''}" data-tag="${esc(t)}">${esc(t)}</button>`).join('')}</div></div>
+    <div class="form-actions"><button type="button" class="btn btn-primary" id="dc-submit">AI 推荐目的地</button></div>
+    <div id="discover-results">${resultsHtml}</div>
+  </details>`;
+}
+
+function bindDiscoverEvents() {
+  document.getElementById('dc-submit')?.addEventListener('click', discoverDestinations);
+  document.querySelectorAll('.tag-chip').forEach((chip) => chip.addEventListener('click', () => chip.classList.toggle('selected')));
+  bindDiscoverResultEvents();
+}
+
+function bindDiscoverResultEvents() {
+  const cands = discoverCache?.response?.candidates || [];
+  document.querySelectorAll('[data-candidate-index]').forEach((btn) => {
+    const idx = Number(btn.dataset.candidateIndex);
+    if (cands[idx]) btn.addEventListener('click', () => addCandidateToPlan(cands[idx]));
+  });
+}
+
+function readDiscoverRequest() {
+  const tags = [...document.querySelectorAll('.tag-chip.selected')].map((b) => b.dataset.tag);
+  const monthVal = document.getElementById('dc-month').value.trim();
+  return {
+    origin_city: document.getElementById('dc-origin').value.trim(),
+    transport_mode: document.getElementById('dc-transport').value,
+    days: Number(document.getElementById('dc-days').value) || 3,
+    travelers: Number(document.getElementById('dc-people').value) || 2,
+    strategy: document.getElementById('dc-strategy').value,
+    budget_tier: document.getElementById('dc-budget').value,
+    month: monthVal ? Number(monthVal) : null,
+    tags,
+  };
+}
+
+function renderDiscoverResults(data) {
+  const cands = data.candidates || [];
+  if (!cands.length) return '<div class="empty">未生成候选，换个条件重试</div>';
+  const note = data.strategy_note ? `<div class="discover-note muted">🎯 ${esc(data.strategy_note)} <span class="badge badge-outline">${esc(data.source || '')}</span></div>` : '';
+  return `${note}<div class="discover-candidates">${cands.map(renderDiscoverCandidate).join('')}</div>`;
+}
+
+function renderDiscoverCandidate(c, index) {
+  const t = c.transport || {};
+  const accBadge = t.accuracy === '高德精确'
+    ? '<span class="badge badge-ok">高德精确</span>'
+    : (t.accuracy ? `<span class="badge badge-outline">${esc(t.accuracy)}</span>` : '');
+  const dur = t.duration_hours != null ? `${t.duration_hours}h` : '时长未知';
+  const dist = t.distance_km != null ? ` · ${t.distance_km}km` : '';
+  const transportLine = t.mode ? `<div class="candidate-transport">🚗 ${esc(t.mode)} · ${dur}${dist} ${accBadge}${t.note ? ` <small class="muted">${esc(t.note)}</small>` : ''}</div>` : '';
+  const highlights = (c.highlights || []).length ? `<div class="candidate-highlights"><b>亮点：</b>${c.highlights.map((h) => `<span class="chip-mini">${esc(h)}</span>`).join('')}</div>` : '';
+  const tags = (c.tags || []).length ? `<div class="candidate-tags">${c.tags.map((tg) => `<span class="badge badge-outline">${esc(tg)}</span>`).join('')}</div>` : '';
+  const metaBits = [c.est_budget_per_person, c.best_days, c.season].filter(Boolean).map((x) => esc(x));
+  const meta = metaBits.length ? `<div class="candidate-meta muted">${metaBits.join(' · ')}</div>` : '';
+  return `<div class="discover-candidate">
+    <div class="candidate-head"><div><h4>${esc(c.name)}</h4>${c.region ? `<div class="muted">${esc(c.region)}</div>` : ''}</div>
+      <button class="btn btn-small btn-primary" data-candidate-index="${index}">加入行程</button></div>
+    ${transportLine}
+    ${c.vibe ? `<div class="candidate-vibe">${esc(c.vibe)}</div>` : ''}
+    ${c.why_not_viral ? `<div class="candidate-why">🤫 ${esc(c.why_not_viral)}</div>` : ''}
+    ${highlights}
+    ${meta}
+    ${tags}
+    ${c.caveats ? `<div class="candidate-caveats muted">⚠ ${esc(c.caveats)}</div>` : ''}
+  </div>`;
+}
+
+function addCandidateToPlan(candidate) {
+  const req = discoverCache?.request || {};
+  showTravelForm(null, {
+    destination: candidate.name,
+    origin_city: req.origin_city || '',
+    transport_mode: req.transport_mode || '不限',
+    strategy: req.strategy || '综合',
+    budget_tier: req.budget_tier || '不限',
+    tags: candidate.tags || [],
+  });
+}
+
+async function discoverDestinations() {
+  const req = readDiscoverRequest();
+  if (!req.origin_city) { toast('请填写出发城市', 'error'); return; }
+  const btn = document.getElementById('dc-submit');
+  const originalText = btn?.textContent;
+  const startedAt = Date.now();
+  let ticker = null;
+  if (btn) {
+    btn.disabled = true;
+    const tick = () => { btn.textContent = `⏳ 推荐中… ${Math.floor((Date.now() - startedAt) / 1000)}s`; };
+    tick();
+    ticker = setInterval(tick, 1000);
+  }
+  document.getElementById('discover-results').innerHTML = '<div class="muted">正在结合 LLM 与高德交通时长生成候选，约需 1 分钟…</div>';
+  toast('正在推荐目的地，约需 1 分钟…');
+  try {
+    const { ok, data } = await fetchJSON(API.travelSuggest, { method: 'POST', body: JSON.stringify(req) });
+    if (!ok) {
+      document.getElementById('discover-results').innerHTML = `<div class="empty">${esc(detailMsg(data, '推荐失败'))}</div>`;
+      return toast(detailMsg(data, '推荐失败'), 'error');
+    }
+    discoverCache = { request: req, response: data };
+    document.getElementById('discover-results').innerHTML = renderDiscoverResults(data);
+    bindDiscoverResultEvents();
+    toast(`已推荐 ${(data.candidates || []).length} 个目的地`, 'success');
+  } catch {
+    toast('推荐失败，请检查网络后重试', 'error');
+  } finally {
+    if (ticker) clearInterval(ticker);
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
+  }
 }
 
 // ============ 日用品 Tab ============
@@ -1946,6 +2168,7 @@ function renderSetup() {
         <div class="setup-status-item">${statusText(s.llm_configured, 'AI 工作台 LLM')}</div>
         <div class="setup-status-item">${statusOptional(s.smtp_configured, 'SMTP 周报（可选）')}</div>
         <div class="setup-status-item">${statusOptional(s.brave_configured, 'Brave 网络搜索（可选）')}</div>
+        <div class="setup-status-item">${statusOptional(s.amap_configured, '高德地图交通时长（可选）')}</div>
         <div class="setup-status-item">${statusOptional(s.agent_token_configured, 'Agent Token（可选）')}</div>
       </div>
       ${s.missing && s.missing.length ? `<div class="setup-missing">待处理：${esc(s.missing.join('、'))}</div>` : '<div class="setup-ok">全部配置就绪 🎉</div>'}
@@ -2006,6 +2229,19 @@ function renderSetup() {
     </details>
 
     <details class="card">
+      <summary class="section-title">高德地图交通时长（可选）</summary>
+      <div class="setup-help">配置后，「旅游计划」目的地推荐会显示精确交通时长：自驾用高德驾车路径规划，高铁/飞机按直线距离估算。不配置则降级为 LLM 估算，旅游功能仍可用。<b>Key 申请：</b><code>https://lbs.amap.com/</code>（选「Web 服务」类型）。</div>
+      <form id="setup-amap-form" class="setup-form">
+        <div class="form-group"><label>高德 Web 服务 Key</label><input type="password" id="amap-api-key" placeholder="高德 Web 服务 Key"></div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">保存并测试</button>
+          <button type="button" class="btn" id="amap-test-only-btn">仅测试</button>
+        </div>
+        <div id="amap-result" class="setup-result"></div>
+      </form>
+    </details>
+
+    <details class="card">
       <summary class="section-title">Agent Token（可选）</summary>
       <div class="setup-help">配置后，外部 AI agent（如 Hermes）可通过 <code>X-HomeDash-Token</code> 请求头调用 <code>/api/agent/todos/*</code> 接口。不配置时接口无需鉴权，仅限内网使用。</div>
       <form id="setup-agent-form" class="setup-form">
@@ -2051,6 +2287,7 @@ function renderSetup() {
   bindSetupEvents();
   loadLlmConfig();
   loadBraveConfig();
+  loadAmapConfig();
   loadAgentConfig();
   loadNotifyConfig();
   loadUsers();
@@ -2062,6 +2299,8 @@ function bindSetupEvents() {
   document.getElementById('llm-models-btn').addEventListener('click', loadLlmModels);
   document.getElementById('setup-brave-form').addEventListener('submit', saveBraveConfig);
   document.getElementById('brave-test-only-btn').addEventListener('click', testBraveConfig);
+  document.getElementById('setup-amap-form').addEventListener('submit', saveAmapConfig);
+  document.getElementById('amap-test-only-btn').addEventListener('click', testAmapConfig);
   document.getElementById('setup-agent-form').addEventListener('submit', saveAgentConfig);
   document.getElementById('setup-notify-form').addEventListener('submit', saveNotifyConfig);
   document.getElementById('notify-test-only-btn').addEventListener('click', testNotifyConfig);
@@ -2276,6 +2515,36 @@ async function testBraveConfig() {
   const resultBox = document.getElementById('brave-result');
   resultBox.textContent = '测试中...';
   const { ok, data } = await fetchJSON(API.setupBraveTest, { method: 'POST', body: JSON.stringify(payload) });
+  resultBox.textContent = data?.message || (ok ? '连接正常' : '连接失败');
+  resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
+}
+
+async function loadAmapConfig() {
+  const { ok, data } = await fetchJSON(API.setupAmapConfig);
+  if (!ok || !data) return;
+  document.getElementById('amap-api-key').value = data.api_key || '';
+}
+
+async function saveAmapConfig(e) {
+  e.preventDefault();
+  const payload = { api_key: document.getElementById('amap-api-key').value.trim() };
+  const { ok, data } = await fetchJSON(API.setupAmapSave, { method: 'POST', body: JSON.stringify(payload) });
+  const resultBox = document.getElementById('amap-result');
+  if (!ok) {
+    resultBox.textContent = data?.detail || '保存失败';
+    resultBox.className = 'setup-result error';
+    return;
+  }
+  resultBox.textContent = data.message || (data.tested ? '保存成功，高德 Key 有效' : '保存成功，但连接测试失败');
+  resultBox.className = `setup-result ${data.tested ? 'success' : 'warning'}`;
+  await refreshSetupOverview();
+}
+
+async function testAmapConfig() {
+  const payload = { api_key: document.getElementById('amap-api-key').value.trim() };
+  const resultBox = document.getElementById('amap-result');
+  resultBox.textContent = '测试中...';
+  const { ok, data } = await fetchJSON(API.setupAmapTest, { method: 'POST', body: JSON.stringify(payload) });
   resultBox.textContent = data?.message || (ok ? '连接正常' : '连接失败');
   resultBox.className = `setup-result ${data?.ok ? 'success' : 'error'}`;
 }

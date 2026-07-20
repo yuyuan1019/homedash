@@ -23,7 +23,7 @@
 | 重点待办 | ✅ 已实现 | 家庭 to-do + home agent 提醒接口 |
 | SMTP 周报 | ✅ 已实现 | QQ 邮箱发送待办 + 需购买周报 |
 | AI 工作台 | ✅ 已实现 | 自然语言 → 工具调用写库 + 操作溯源（带前后快照）+ 撤回；可查收纳记录 |
-| 旅游计划 | ✅ 已实现 | 保存行程；结合天气资料由 LLM 生成可编辑、可勾选的行李清单；常用物品快捷添加 |
+| 旅游计划 | ✅ 已实现 | 目的地推荐（按交通方式 / 避开网红 / 度假·性价比）+ 非网红玩法 + 天气行李清单 |
 | 面板登录与用户管理 | ✅ 已实现 | 180 天长期会话、普通用户/管理员、管理员专属系统设置 |
 
 ### 1. 日用品管理（已实现）
@@ -99,10 +99,12 @@ X-HomeDash-Token: <AGENT_API_TOKEN>
 
 ### 4.1 旅游计划与 AI 行李推荐（已实现）
 
-- 「旅游计划」Tab 可保存目的地、日期、人数、活动偏好和备注，并管理多段行程
-- `POST /api/travel/plans/{id}/recommend` 复用系统 LLM 配置生成结构化行李清单；配置 Brave Search 时先搜索对应地点和日期的天气资料，未配置时明确标记为 LLM 季节常识估算
-- 推荐清单可逐项勾选，也可修改名称、数量、分类、备注并增删项目；修改结果持久化到 SQLite
-- 天气资料仅作打包参考，临行前仍应查看当地官方预警；药品建议不替代医疗意见
+- 「旅游计划」Tab 分两区：上方「✨ 发现目的地」按出发城市、交通方式（高铁/自驾/飞机/不限）、天数、主策略（度假优先/性价比优先/不网红优先/综合）、标签与预算，让 AI 推荐小众、避开网红的真实目的地；下方「我的行程」管理多段行程
+- `POST /api/travel/suggest`（无状态）生成候选目的地，每个含「为什么不网红」理由、非网红亮点、人均预算与交通时长；选定后可一键加入行程
+- `POST /api/travel/plans/{id}/spots` 为选定目的地生成非网红具体玩法清单（可逐项勾选已安排）
+- 交通时长：配置高德 Key 后**自驾用驾车路径规划（精确）**，高铁/飞机按直线距离估算（高德无跨城铁路/航司时刻）；未配置则整体降级为 LLM 估算，旅游功能仍可用
+- `POST /api/travel/plans/{id}/recommend` 复用系统 LLM 生成结构化行李清单；配置 Brave Search 时先搜对应地点和日期的天气资料，否则明确标注为 LLM 季节常识估算；清单可逐项勾选、编辑并持久化到 SQLite
+- 天气与玩法仅供参考，临行前仍应查看当地官方预警；药品建议不替代医疗意见
 
 ### 5. 登录与用户权限（已实现）
 
@@ -263,7 +265,8 @@ python-dotenv
 | `app/modules/notify.py` | SMTP 周报组信与发送 |
 | `app/modules/ai_workbench.py` | LLM 解析、动作校验、审计 API、家庭顾问聊天（可选 Brave Search） |
 | `app/modules/ai_executor.py` | AI 白名单动作执行器 |
-| `app/modules/setup.py` | LLM / SMTP / Brave 配置读写与连通测试 |
+| `app/modules/setup.py` | LLM / SMTP / Brave / 高德 配置读写与连通测试 |
+| `app/modules/travel.py` | 旅游计划 CRUD；目的地推荐引擎（交通方式/策略）+ 非网红玩法 + 天气行李清单 + 高德交通时长（可选） |
 | `app/static/index.html` | 页面骨架（AI / 日用品 / 重点待办 三 Tab） |
 | `app/static/style.css` | 浅色主题 |
 | `app/static/app.js` | 前端逻辑 |
@@ -310,9 +313,10 @@ docker compose up -d --build
 
 部署后打开面板，以管理员账户点击右上角 **••• → 系统设置**：
 
-- **配置总览**：实时显示 AI 工作台、SMTP、Brave Search、Agent Token 的状态与缺失项。
+- **配置总览**：实时显示 AI 工作台、SMTP、Brave Search、高德地图、Agent Token 的状态与缺失项。
 - **AI 工作台**：填写 LLM Base URL、API Key、模型，保存后写入 `data/llm_config.json` 并立即生效；可从上游 `/models` 获取模型列表，**无需重启容器**。
 - **Brave Search**：可选，配置后家庭顾问可联网搜索；保存到 `data/brave_config.json`，未配置不影响聊天。
+- **高德地图**：可选，用于旅游推荐的精确交通时长；保存到 `data/amap_config.json`，未配置则降级为 LLM 估算。
 - **SMTP 周报**：填写 SMTP Host、授权码、收件人，保存后写入 `data/notify_config.json` 并立即生效，支持页面测试登录和试发周报。
 - **Agent Token**：仍需写入宿主机 `.env` 后执行 `docker compose restart`。
 
@@ -332,6 +336,7 @@ docker compose up -d --build
 | `SMTP_*` / `NOTIFY_*` | QQ 邮箱 SMTP 周报 |
 | `LLM_*` / `AI_*` | AI 工作台 |
 | `BRAVE_API_KEY` | 家庭顾问联网搜索（可选） |
+| `AMAP_API_KEY` | 高德地图交通时长（旅游推荐，可选） |
 | `AGENT_API_TOKEN` | home agent 调 `/api/agent/*`；为空仅适合内网 |
 | `HOMEDASH_PUBLIC_URL` | 邮件里的面板链接 |
 
@@ -393,6 +398,12 @@ python -m app.modules.setup        # LLM / SMTP / Brave 配置读写与掩码
 | GET / DELETE | `/api/placements/{id}/images/{image_id}` | 读取或移除收纳照片 |
 | POST | `/api/placements/{id}/suggest` | LLM 关联库存物品候选（AI 未配置返回 503） |
 | PUT | `/api/placements/{id}/confirm` | 确认关联（item_ids + 可选位置） |
+| GET / POST | `/api/travel/plans` | 旅游行程列表 / 新建（含出发城市、交通方式、策略等偏好） |
+| PUT / DELETE | `/api/travel/plans/{id}` | 编辑、删除行程 |
+| PUT | `/api/travel/plans/{id}/packing` | 保存行李清单 |
+| POST | `/api/travel/plans/{id}/recommend` | LLM 生成行李清单（结合 Brave 天气） |
+| POST / PUT | `/api/travel/plans/{id}/spots` | 生成 / 保存非网红玩法清单 |
+| POST | `/api/travel/suggest` | 按交通方式/策略推荐候选目的地（AI 未配置 503） |
 | GET / POST | `/api/notify/config`、`/test`、`/weekly` | SMTP 配置状态、试发、周报 |
 | POST | `/api/ai/parse`、`/apply` | AI 解析预览、确认写入 |
 | POST | `/api/ai/chat` | 家庭顾问聊天（可选联网搜索） |
@@ -400,10 +411,11 @@ python -m app.modules.setup        # LLM / SMTP / Brave 配置读写与掩码
 | GET | `/api/ai/audit` | AI 写库审计记录 |
 | GET | `/api/ai/suggested-chips` | 获取建议操作快捷片段 |
 | POST | `/api/ai/revert/{action_id}` | 撤回某条 AI 写操作 |
-| GET | `/api/setup/status` | 配置总览（LLM/SMTP/Brave/Agent 状态） |
+| GET | `/api/setup/status` | 配置总览（LLM/SMTP/Brave/高德/Agent 状态） |
 | GET / POST | `/api/setup/llm/config`、`/save`、`/test` | LLM 配置读取、保存、测试连接 |
 | GET | `/api/setup/llm/models` | 获取上游可用模型列表 |
 | GET / POST | `/api/setup/brave/config`、`/save`、`/test` | Brave Search 配置 |
+| GET / POST | `/api/setup/amap/config`、`/save`、`/test` | 高德地图配置（旅游交通时长，可选） |
 | GET / POST | `/api/setup/agent/config`、`/save` | Agent Token 配置 |
 | GET / POST | `/api/setup/notify/config`、`/save`、`/test` | SMTP 配置（热加载） |
 | GET | `/api/setup/env-snippet` | 生成 .env 配置片段 |

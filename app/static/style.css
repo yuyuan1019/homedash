@@ -173,6 +173,52 @@ header h1 {
   .packing-edit-row .packing-remove { grid-column: 1 / -1; }
 }
 
+/* 旅游页头部（修复拥挤：原 .section-header/.section-subtitle 无样式会塌成一团） */
+.section-header { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.section-header h2 { margin: 0; font-size: 1.3rem; }
+.section-subtitle { margin: .25rem 0 0; color: var(--muted); font-size: .88rem; }
+.travel-header-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+.section-mini-title { font-size: 1rem; font-weight: 600; color: #3d5f7a; margin: 1.2rem 0 .2rem; }
+
+/* 发现目的地 */
+.discover-card { padding: .9rem 1rem; margin-bottom: 1rem; }
+.discover-card > summary.section-title { margin-top: 0; }
+.discover-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .6rem .8rem; margin: .6rem 0; }
+.discover-hint { padding: .6rem 0; font-size: .88rem; }
+.discover-note { padding: .5rem .7rem; background: var(--accent-soft); border-radius: var(--radius-sm); margin: .6rem 0; font-size: .9rem; }
+.discover-candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .9rem; margin-top: .6rem; }
+.discover-candidate { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: .9rem; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: .4rem; }
+.candidate-head { display: flex; justify-content: space-between; align-items: flex-start; gap: .6rem; }
+.candidate-head h4 { margin: 0; font-size: 1.05rem; }
+.candidate-transport { font-size: .86rem; display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; }
+.candidate-vibe { font-size: .9rem; }
+.candidate-why { font-size: .86rem; background: var(--accent-soft); border-radius: var(--radius-sm); padding: .4rem .6rem; color: #8a5a00; }
+.candidate-highlights { font-size: .84rem; display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; }
+.chip-mini { background: var(--line); border-radius: 999px; padding: .15rem .55rem; font-size: .78rem; }
+.candidate-meta { font-size: .82rem; }
+.candidate-tags { display: flex; flex-wrap: wrap; gap: .25rem; }
+.candidate-caveats { font-size: .8rem; }
+
+/* 标签多选 chip */
+.tag-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.tag-chip { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: .28rem .8rem; font-size: .85rem; cursor: pointer; color: var(--text); }
+.tag-chip:hover { border-color: var(--accent); }
+.tag-chip.selected { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* 行程卡偏好徽章 + 推荐玩法清单 */
+.travel-prefs { margin-top: .35rem; display: flex; flex-wrap: wrap; gap: .25rem; }
+.spots-list { margin-top: .3rem; }
+.spot-row { display: flex; align-items: flex-start; gap: .5rem; padding: .45rem .2rem; border-bottom: 1px solid var(--line); }
+.spot-row span { display: flex; flex-direction: column; font-size: .9rem; }
+.spot-row small { color: var(--muted); font-size: .8rem; margin-top: .15rem; }
+.spot-row.booked { opacity: .55; }
+.spot-row.booked span { text-decoration: line-through; }
+
+@media (max-width: 700px) {
+  .discover-form { grid-template-columns: 1fr 1fr; }
+  .candidate-head { flex-direction: column; align-items: stretch; }
+}
+
 main {
   max-width: 720px;
   margin: 0 auto;

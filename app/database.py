@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS travel_plans (
     weather_summary TEXT,
     weather_source TEXT,
     packing_json TEXT NOT NULL DEFAULT '[]',
+    origin_city TEXT,
+    transport_mode TEXT,
+    budget_tier TEXT,
+    strategy TEXT,
+    tags TEXT,
+    spots_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
@@ -147,6 +153,10 @@ async def init_db() -> None:
     await _db.executescript(SCHEMA)
     await _ensure_columns(_db, "items", {"location": "TEXT", "expires_at": "TEXT", "images": "TEXT"})
     await _ensure_columns(_db, "todos", {"images": "TEXT"})
+    await _ensure_columns(_db, "travel_plans", {
+        "origin_city": "TEXT", "transport_mode": "TEXT", "budget_tier": "TEXT",
+        "strategy": "TEXT", "tags": "TEXT", "spots_json": "TEXT NOT NULL DEFAULT '[]'",
+    })
     await _ensure_columns(_db, "ai_audit", {
         "stage": "TEXT", "session_id": "TEXT", "llm_model": "TEXT",
         "llm_reply": "TEXT", "confidence": "TEXT", "duration_ms": "INTEGER",
