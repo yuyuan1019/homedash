@@ -253,7 +253,9 @@ const TRAVEL_TAG_OPTIONS = ['温泉', '海岛', '自然山水', '古镇', 'City 
 
 async function loadTravelPlans() {
   const container = document.getElementById('tab-travel');
-  container.innerHTML = '<div class="loading">加载旅游计划...</div>';
+  if (!container.querySelector('.travel-list')) {
+    container.innerHTML = '<div class="loading">加载旅游计划...</div>';
+  }
   const { ok, data } = await fetchJSON(API.travelPlans);
   if (!ok) {
     // 加载失败也保留「新建行程」入口，避免空白页无从恢复
@@ -262,17 +264,22 @@ async function loadTravelPlans() {
     return;
   }
   travelPlans = data || [];
-  container.innerHTML = `
-    <div class="section-header"><div><h2>🧳 旅游计划</h2><p class="section-subtitle">发现小众目的地 · 规划行程 · 打包行李</p></div><div class="travel-header-actions"><button class="btn" id="travel-discover-btn">✨ 发现目的地</button><button class="btn btn-primary" id="travel-add">＋ 新建行程</button></div></div>
-    ${renderDiscoverPanel()}
-    <div class="section-mini-title">我的行程</div>
-    <div class="travel-list">${travelPlans.length ? travelPlans.map(renderTravelCard).join('') : '<div class="empty">还没有行程。点上方「✨ 发现目的地」让 AI 按交通方式推荐小众去处，或「＋ 新建行程」手动添加。</div>'}</div>`;
-  document.getElementById('travel-add').addEventListener('click', () => showTravelForm());
-  document.getElementById('travel-discover-btn').addEventListener('click', () => {
-    const panel = document.getElementById('discover-panel');
-    if (panel) { panel.open = true; document.getElementById('dc-origin')?.focus(); }
-  });
-  bindDiscoverEvents();
+  if (!container.querySelector('.travel-list')) {
+    container.innerHTML = `
+      <div class="section-header"><div><h2>🧳 旅游计划</h2><p class="section-subtitle">发现小众目的地 · 规划行程 · 打包行李</p></div><div class="travel-header-actions"><button class="btn" id="travel-discover-btn">✨ 发现目的地</button><button class="btn btn-primary" id="travel-add">＋ 新建行程</button></div></div>
+      ${renderDiscoverPanel()}
+      <div class="section-mini-title">我的行程</div>
+      <div class="travel-list"></div>`;
+    document.getElementById('travel-add').addEventListener('click', () => showTravelForm());
+    document.getElementById('travel-discover-btn').addEventListener('click', () => {
+      const panel = document.getElementById('discover-panel');
+      if (panel) { panel.open = true; document.getElementById('dc-origin')?.focus(); }
+    });
+    bindDiscoverEvents();
+  }
+  container.querySelector('.travel-list').innerHTML = travelPlans.length
+    ? travelPlans.map(renderTravelCard).join('')
+    : '<div class="empty">还没有行程。点上方「✨ 发现目的地」让 AI 按交通方式推荐小众去处，或「＋ 新建行程」手动添加。</div>';
   container.querySelectorAll('[data-travel-action]').forEach((btn) => btn.addEventListener('click', () => handleTravelAction(btn.dataset.travelAction, Number(btn.dataset.id))));
   container.querySelectorAll('.packing-check').forEach((box) => box.addEventListener('change', () => togglePacked(Number(box.dataset.id), Number(box.dataset.index), box.checked)));
   container.querySelectorAll('.spot-check').forEach((box) => box.addEventListener('change', () => toggleSpotBooked(Number(box.dataset.id), Number(box.dataset.index), box.checked)));
@@ -316,7 +323,7 @@ function showTravelForm(plan = null, prefill = null) {
   bindModalClose();
   document.getElementById('travel-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const tags = document.getElementById('travel-tags').value.split(',').map((s) => s.trim()).filter(Boolean);
+    const tags = document.getElementById('travel-tags').value.split(/[,，、]/).map((s) => s.trim()).filter(Boolean);
     const payload = {
       destination: document.getElementById('travel-destination').value.trim(),
       origin_city: document.getElementById('travel-origin').value.trim(),
@@ -526,14 +533,17 @@ function bindDiscoverResultEvents() {
 function readDiscoverRequest() {
   const tags = [...document.querySelectorAll('.tag-chip.selected')].map((b) => b.dataset.tag);
   const monthVal = document.getElementById('dc-month').value.trim();
+  const daysVal = Number(document.getElementById('dc-days').value);
+  const travelersVal = Number(document.getElementById('dc-people').value);
+  const monthNum = monthVal ? Number(monthVal) : null;
   return {
     origin_city: document.getElementById('dc-origin').value.trim(),
     transport_mode: document.getElementById('dc-transport').value,
-    days: Number(document.getElementById('dc-days').value) || 3,
-    travelers: Number(document.getElementById('dc-people').value) || 2,
+    days: Number.isFinite(daysVal) ? daysVal : 3,
+    travelers: Number.isFinite(travelersVal) ? travelersVal : 2,
     strategy: document.getElementById('dc-strategy').value,
     budget_tier: document.getElementById('dc-budget').value,
-    month: monthVal ? Number(monthVal) : null,
+    month: monthNum !== null && Number.isFinite(monthNum) ? monthNum : null,
     tags,
   };
 }
@@ -1251,36 +1261,16 @@ function renderTodoCard(todo) {
     </div>`;
 }
 
-function renderTodos(todos) {
-  const container = document.getElementById('tab-todos');
-  // 客户端即时搜索：按标题或内容（note）子串过滤，不区分大小写（照抄 placement-filter 模式）
+function renderTodoList(todos) {
+  // 只刷新列表/空态子层，不重建 toolbar（含 #todo-search），
+  // 保证搜索框 input 事件重渲染时焦点不丢失。
+  const host = document.getElementById('todo-list-host');
+  if (!host) return;
   const q = todoQuery.trim().toLowerCase();
   const shown = q ? todos.filter((t) => (t.title || '').toLowerCase().includes(q) || (t.note || '').toLowerCase().includes(q)) : todos;
   const emptyTitle = todoStatus === 'open' ? '暂无未完成重点待办' : '暂无已完成重点待办';
   const emptyMsg = !todos.length ? emptyTitle : '没有匹配的待办';
-  container.innerHTML = `
-    <div class="toolbar">
-      <button class="btn btn-primary" id="add-todo-btn">+ 添加待办</button>
-      <button class="btn ${todoStatus === 'open' ? 'btn-primary' : ''}" id="show-open-todos">未完成</button>
-      <button class="btn ${todoStatus === 'done' ? 'btn-primary' : ''}" id="show-done-todos">已完成</button>
-      <input id="todo-search" class="todo-search" type="search" placeholder="搜索标题或内容…" value="${esc(todoQuery)}">
-    </div>
-    ${shown.length ? `<div class="todo-list">${shown.map(renderTodoCard).join('')}</div>` : `<div class="empty-state">${emptyMsg}</div>`}`;
-  document.getElementById('add-todo-btn').addEventListener('click', () => showTodoForm());
-  document.getElementById('show-open-todos').addEventListener('click', () => {
-    todoStatus = 'open';
-    todoQuery = '';  // 切换未完成/已完成时清空搜索，避免跨状态残留无效关键词
-    loadTodos();
-  });
-  document.getElementById('show-done-todos').addEventListener('click', () => {
-    todoStatus = 'done';
-    todoQuery = '';
-    loadTodos();
-  });
-  document.getElementById('todo-search').addEventListener('input', (e) => {
-    todoQuery = e.target.value;
-    renderTodos(todosCache);  // 复用已加载数据即时重渲染，不重复请求后端
-  });
+  host.innerHTML = shown.length ? `<div class="todo-list">${shown.map(renderTodoCard).join('')}</div>` : `<div class="empty-state">${emptyMsg}</div>`;
   document.querySelectorAll('.todo-done').forEach((button) => {
     button.addEventListener('click', () => setTodoStatus(Number(button.dataset.id), true));
   });
@@ -1304,6 +1294,34 @@ function renderTodos(todos) {
       }
     });
   });
+}
+
+function renderTodos(todos) {
+  const container = document.getElementById('tab-todos');
+  container.innerHTML = `
+    <div class="toolbar">
+      <button class="btn btn-primary" id="add-todo-btn">+ 添加待办</button>
+      <button class="btn ${todoStatus === 'open' ? 'btn-primary' : ''}" id="show-open-todos">未完成</button>
+      <button class="btn ${todoStatus === 'done' ? 'btn-primary' : ''}" id="show-done-todos">已完成</button>
+      <input id="todo-search" class="todo-search" type="search" placeholder="搜索标题或内容…" value="${esc(todoQuery)}">
+    </div>
+    <div id="todo-list-host"></div>`;
+  document.getElementById('add-todo-btn').addEventListener('click', () => showTodoForm());
+  document.getElementById('show-open-todos').addEventListener('click', () => {
+    todoStatus = 'open';
+    todoQuery = '';  // 切换未完成/已完成时清空搜索，避免跨状态残留无效关键词
+    loadTodos();
+  });
+  document.getElementById('show-done-todos').addEventListener('click', () => {
+    todoStatus = 'done';
+    todoQuery = '';
+    loadTodos();
+  });
+  document.getElementById('todo-search').addEventListener('input', (e) => {
+    todoQuery = e.target.value;
+    renderTodoList(todosCache);  // 复用已加载数据即时过滤，不重复请求后端
+  });
+  renderTodoList(todos);
 }
 
 async function loadTodos() {

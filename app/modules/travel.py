@@ -56,9 +56,10 @@ def _amap_config() -> dict | None:
         return None
     try:
         with open(path) as f:
-            return json.load(f)
+            data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 def _amap_api_key() -> str | None:
@@ -224,6 +225,13 @@ class DestinationSuggestion(BaseModel):
     transport_note: str = Field(default="", max_length=200)  # LLM 定性描述，供无高德时兜底
     transport: TransportInfo | None = None
 
+    @field_validator("transport", mode="before")
+    @classmethod
+    def _coerce_transport(cls, value):
+        if value is None or isinstance(value, dict):
+            return value
+        return None
+
     @field_validator("region", "vibe", "why_not_viral", "est_budget_per_person",
                      "best_days", "season", "caveats", "transport_note", mode="before")
     @classmethod
@@ -333,9 +341,12 @@ async def update_plan(plan_id: int, payload: PlanIn, db=Depends(get_db)):
     # ponytail: 日期一旦变化，旧 weather 不再适用；这里直接清空，避免在新日期旁展示误导性天气。
     if str(prev["start_date"]) != str(payload.start_date) or str(prev["end_date"]) != str(payload.end_date):
         await db.execute("UPDATE travel_plans SET weather_summary=NULL, weather_source=NULL WHERE id=?", (plan_id,))
-    # 目的地变了，旧的「非网红玩法」清单也作废
+    # 目的地变了，旧的「非网红玩法」清单与旧天气都作废（weather 同样绑定目的地）
     if str(prev["destination"]) != payload.destination:
-        await db.execute("UPDATE travel_plans SET spots_json='[]' WHERE id=?", (plan_id,))
+        await db.execute(
+            "UPDATE travel_plans SET spots_json='[]', weather_summary=NULL, weather_source=NULL WHERE id=?",
+            (plan_id,),
+        )
     await db.commit()
     return {"ok": True}
 
@@ -394,6 +405,8 @@ async def _amap_geocode(client: httpx.AsyncClient, key: str, address: str, city:
     if resp.status_code >= 400:
         return None
     data = resp.json()  # 高德非 JSON（验证码页）时抛 ValueError，由调用方捕获
+    if not isinstance(data, dict):
+        return None
     if str(data.get("status")) != "1":  # ponytail: 高德 status 是字符串 "1"
         return None
     geocodes = data.get("geocodes") or []
@@ -417,6 +430,8 @@ async def _amap_driving(client: httpx.AsyncClient, key: str, origin, dest):
     if resp.status_code >= 400:
         return None
     data = resp.json()
+    if not isinstance(data, dict):
+        return None
     if str(data.get("status")) != "1":
         return None
     paths = (data.get("route") or {}).get("paths") or []
@@ -450,7 +465,7 @@ async def _compute_transport(client, key, origin_coord, dest_address, dest_regio
         km = _haversine_km(origin_coord, dest_coord)
         speed = _SPEED_KMH.get(mode or "不限", 80.0)
         hours = km / speed if speed else None
-        return TransportInfo(mode=mode or "不限", duration_hours=round(hours, 1) if hours else None,
+        return TransportInfo(mode=mode or "不限", duration_hours=round(hours, 1) if hours is not None else None,
                              distance_km=round(km, 1), note=llm_note, accuracy="距离估算")
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, ZeroDivisionError):
         return fallback
@@ -526,14 +541,13 @@ async def suggest(payload: SuggestIn, db=Depends(get_db)):
         candidates, strategy_note, llm_source = await _suggest_destinations(payload)
     except HTTPException:
         raise
-    except (httpx.HTTPError, KeyError, IndexError) as exc:
+    except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
         await _safe_audit(db, raw_text=payload.origin_city, ok=False, stage="travel_suggest", error=str(exc) or exc.__class__.__name__)
         raise HTTPException(502, "模型未返回有效的目的地推荐，请稍后重试") from exc
     except ValueError as exc:
         await _safe_audit(db, raw_text=payload.origin_city, ok=False, stage="travel_suggest", error=str(exc))
         raise HTTPException(502, str(exc) or "模型未返回有效的目的地推荐") from exc
     # 高德交通时长 enrichment：geocode 出发城市一次，并发算各候选
-    amap_tag = "高德交通时长" if amap_key else "LLM 交通估算"
     async with httpx.AsyncClient(timeout=15.0) as geo_client:
         origin_coord = None
         if amap_key:
@@ -549,6 +563,9 @@ async def suggest(payload: SuggestIn, db=Depends(get_db)):
     for cand, res in zip(candidates, results):
         info = res if isinstance(res, TransportInfo) else TransportInfo(mode=payload.transport_mode, accuracy="LLM 估算")
         cand["transport"] = info.model_dump()
+    amap_tag = "高德交通时长" if any(
+        ((cand.get("transport") or {}).get("accuracy") in {"高德精确", "距离估算"}) for cand in candidates
+    ) else "LLM 交通估算"
     source = " + ".join([llm_source, amap_tag])
     await _safe_audit(db, raw_text=payload.origin_city, ok=True, stage="travel_suggest",
                       actions={"count": len(candidates), "strategy": payload.strategy}, llm_model=None)
@@ -616,7 +633,7 @@ async def recommend_spots(plan_id: int, db=Depends(get_db)):
         summary = str(raw_summary).strip()[:500] if isinstance(raw_summary, str) else ""
     except HTTPException:
         raise
-    except (httpx.HTTPError, KeyError, IndexError) as exc:
+    except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
         raise HTTPException(502, "模型未返回有效的玩法清单，请稍后重试") from exc
     except ValueError as exc:
         raise HTTPException(502, str(exc) or "模型未返回有效的玩法清单") from exc
@@ -741,6 +758,8 @@ if __name__ == "__main__":
     })
     assert ds.vibe == "123" and ds.highlights == [] and ds.tags == ["温泉", "7"] and ds.transport_note == ""
     assert ds.transport is None
+    ds2 = DestinationSuggestion.model_validate({"name": "海螺沟", "transport": "成都自驾约4小时"})
+    assert ds2.transport is None
     # SpotItem 容错
     sp = SpotItem.model_validate({"name": "贡嘎神汤温泉", "type": 5, "duration_hours": 2})
     assert sp.type == "5" and sp.duration_hours == 2.0 and sp.booked is False

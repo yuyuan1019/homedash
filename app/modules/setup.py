@@ -158,9 +158,10 @@ def _amap_file_config() -> dict | None:
         return None
     try:
         with open(AMAP_CONFIG_FILE) as f:
-            return json.load(f)
+            data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
+    return data if isinstance(data, dict) else None
 
 
 def _amap_config() -> dict:
@@ -263,6 +264,8 @@ async def _test_llm_connection(cfg: dict) -> tuple[bool, str]:
                         headers={"Authorization": f"Bearer {cfg['api_key']}"},
                         json={"model": cfg["model"], "messages": [{"role": "user", "content": "只输出 JSON：{\"ok\":true}"}], "max_tokens": 20},
                     )
+                    if response.status_code >= 400:
+                        return False, _llm_error_message(response.status_code)
                 else:
                     return False, _llm_error_message(response.status_code)
             content = response.json()["choices"][0]["message"]["content"]
@@ -319,6 +322,8 @@ async def _test_amap_connection(api_key: str) -> tuple[bool, str]:
         data = resp.json()
     except (httpx.HTTPError, ValueError):
         return False, "高德连接失败，请检查网络与 Key"
+    if not isinstance(data, dict):
+        return False, "高德返回异常格式，请检查 Key"
     if str(data.get("status")) != "1":
         info = data.get("info") or "Key 无效或配额问题"
         return False, f"高德 Key 校验失败：{info}"
@@ -399,7 +404,7 @@ def _merge_brave_payload(payload: BraveConfigIn) -> dict:
 def _merge_amap_payload(payload: AmapConfigIn) -> dict:
     current = _amap_config()
     api_key = payload.api_key.strip()
-    if not api_key or _masked(api_key):
+    if _masked(api_key):
         api_key = current.get("api_key", "")
     return {"api_key": api_key}
 
@@ -634,6 +639,7 @@ if __name__ == "__main__":
 
         _write_json(AMAP_CONFIG_FILE, {"api_key": "amap-test"})
         assert _amap_file_config()["api_key"] == "amap-test"
+        assert _merge_amap_payload(AmapConfigIn(api_key=""))["api_key"] == ""
 
         assert _mask("sk-abcdefgh1234") == "sk-a*******1234"
         assert _mask("") == ""
