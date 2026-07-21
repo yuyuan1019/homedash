@@ -1,5 +1,7 @@
 # AI 工作台报错排查与明日修复计划
 
+> ✅ **状态：已完成（存档）。** 下文 5 项后端修复（`GET /api/setup/llm/models`、`response_format` JSON 约束+400 回退、HTTP 状态码细化错误、JSON 代码块提取、结构化测试）均已落地。本文件保留作历史记录；权威文档见根目录 `AGENTS.md` / `DEVPLAN.md` / `README.md` / `DESIGN.md`。
+
 日期：2026-07-14
 
 ## 现象
