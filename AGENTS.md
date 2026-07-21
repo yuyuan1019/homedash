@@ -192,7 +192,7 @@ python -m app.modules.setup
 ## 当前阶段
 
 - ✅ 后端 + 前端四 Tab（AI 工作台 / 日用品 / 重点待办 / 旅游计划）+ EWMA 预测 + SMTP 周报 + AI 工作台 + 旅游重设计（目的地推荐/非网红玩法/高德交通时长）+ 家庭顾问聊天（可选 Brave Search）+ 登录/用户权限 + Docker
-- ⬜ DEVPLAN：无未完成核心待办
+- ⬜ DEVPLAN：待办 18/19（旅游行程规划 + LLM 体验与 UI 打磨）规划中
 - 以**代码**与 **README 状态表**为准；DESIGN 仅作设计背景  
 
 ## 代码风格
