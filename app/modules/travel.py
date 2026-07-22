@@ -14,6 +14,7 @@ from datetime import date
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.database import get_db
@@ -27,6 +28,7 @@ from app.modules.ai_workbench import (
     _loads_json_object,
     _response_json,
     _safe_audit,
+    _sse,
 )
 
 router = APIRouter()
@@ -572,6 +574,66 @@ async def suggest(payload: SuggestIn, db=Depends(get_db)):
     return {"ok": True, "strategy_note": strategy_note, "source": source,
             "origin_city": payload.origin_city, "transport_mode": payload.transport_mode,
             "candidates": candidates}
+
+
+@router.post("/travel/suggest/stream")
+async def suggest_stream(payload: SuggestIn, db=Depends(get_db)):
+    """流式版目的地推荐：分阶段推送进度（联网 → AI 生成 → 交通时长），最后推 done(候选)。
+    LLM 本身仍非流式（输出 JSON，逐字显示无意义）；阶段可见即可缓解长等待。
+    # ponytail: 阶段为预判顺序，未拆分 _suggest_destinations 内部 brave/llm 以保持最小改动。
+    """
+    if not _enabled():
+        raise HTTPException(503, "AI 功能未开启")
+    amap_key = _amap_api_key()
+    brave_on = _brave_api_key() is not None
+
+    async def event_gen():
+        try:
+            if brave_on:
+                yield _sse("stage", {"stage": "brave", "text": "正在联网搜索小众目的地参考…"})
+            yield _sse("stage", {"stage": "llm", "text": "AI 正在筛选并生成候选目的地，约需 1 分钟…"})
+            candidates, strategy_note, llm_source = await _suggest_destinations(payload)
+            yield _sse("stage", {"stage": "amap", "text": "正在计算出发地到各候选的交通时长…"})
+            # 高德 enrichment：与 suggest() 同构，geocode 出发城市一次后并发算各候选
+            async with httpx.AsyncClient(timeout=15.0) as geo_client:
+                origin_coord = None
+                if amap_key:
+                    try:
+                        origin_coord = await _amap_geocode(geo_client, amap_key, payload.origin_city)
+                    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+                        origin_coord = None
+                results = await asyncio.gather(*[
+                    _compute_transport(geo_client, amap_key, origin_coord, c.get("name") or "",
+                                       c.get("region") or "", payload.transport_mode, c.get("transport_note") or "")
+                    for c in candidates
+                ], return_exceptions=True)
+            for cand, res in zip(candidates, results):
+                info = res if isinstance(res, TransportInfo) else TransportInfo(mode=payload.transport_mode, accuracy="LLM 估算")
+                cand["transport"] = info.model_dump()
+            amap_tag = "高德交通时长" if any(
+                ((cand.get("transport") or {}).get("accuracy") in {"高德精确", "距离估算"}) for cand in candidates
+            ) else "LLM 交通估算"
+            source = " + ".join([llm_source, amap_tag])
+            await _safe_audit(db, raw_text=payload.origin_city, ok=True, stage="travel_suggest",
+                              actions={"count": len(candidates), "strategy": payload.strategy}, llm_model=None)
+            yield _sse("done", {"ok": True, "strategy_note": strategy_note, "source": source,
+                                "origin_city": payload.origin_city, "transport_mode": payload.transport_mode,
+                                "candidates": candidates})
+        except HTTPException as exc:
+            await _safe_audit(db, raw_text=payload.origin_city, ok=False, stage="travel_suggest",
+                              error=str(exc.detail) if exc.detail else "推荐失败")
+            yield _sse("error", {"detail": str(exc.detail) if exc.detail else "推荐失败"})
+        except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
+            await _safe_audit(db, raw_text=payload.origin_city, ok=False, stage="travel_suggest",
+                              error=str(exc) or exc.__class__.__name__)
+            yield _sse("error", {"detail": "模型未返回有效的目的地推荐，请稍后重试"})
+        except ValueError as exc:
+            await _safe_audit(db, raw_text=payload.origin_city, ok=False, stage="travel_suggest",
+                              error=str(exc))
+            yield _sse("error", {"detail": str(exc) or "模型未返回有效的目的地推荐"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ============ 非网红玩法（行程深化） ============

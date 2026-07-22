@@ -1426,3 +1426,36 @@ main {
   }
 }
 
+
+/* ============ AI 流式输出（SSE） ============ */
+/* 流式光标：跟随正在生成的文字闪烁 */
+.stream-cursor {
+  display: inline-block;
+  width: 0.55em;
+  margin-left: 1px;
+  color: var(--primary);
+  opacity: 0.7;
+  animation: stream-blink 1s steps(2) infinite;
+}
+@keyframes stream-blink { 50% { opacity: 0; } }
+
+/* 推理过程（DeepSeek 等模型的 reasoning_content），弱化呈现 */
+.chat-reasoning {
+  font-size: 0.85em;
+  color: #7a8a99;
+  background: rgba(125, 140, 160, 0.08);
+  border-left: 2px solid rgba(125, 140, 160, 0.35);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.4rem;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.chat-reasoning .stream-cursor { color: #7a8a99; }
+
+/* 工具执行阶段提示（聊天内） */
+.chat-stage { font-size: 0.85em; margin: 0.2rem 0 0.4rem; }
+
+/* 旅游推荐分阶段进度 */
+.discover-stage { padding: 0.7rem 0; font-size: 0.92rem; }
+.discover-elapsed { margin-left: 0.4rem; opacity: 0.65; font-variant-numeric: tabular-nums; }

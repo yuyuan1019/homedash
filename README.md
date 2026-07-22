@@ -96,11 +96,13 @@ X-HomeDash-Token: <AGENT_API_TOKEN>
 - LLM 不能执行 SQL；非法操作、SQL 关键词、越界数值都会被服务端拒绝
 - **字段归一化**：LLM 输出 `name` 或 `item_name` 均归一为 `name`；购买/消耗/盘点/更新缺少物品标识一律拒绝，空名物品无法创建
 - **全流程审计**：parse 与 apply 两阶段**无论成败都写 `ai_audit`**，记录 `session_id`、`llm_model`、`reply`、`confidence`、`duration_ms`、`error`，以及每条写操作的 `before_json`/`after_json` 前后快照；前端「操作溯源」区按 session 串联展示，支持按条撤回
+- **流式回复**：`POST /api/ai/chat/stream`（SSE）让助手回复逐字呈现，并在工具调用阶段显示「正在执行操作…」；模型若返回 `reasoning_content`（如 DeepSeek 深度思考）会在气泡内弱化展示推理过程。上游不支持流式时前端自动回退到 `POST /api/ai/chat`（非流式），体验不中断
 
 ### 4.1 旅游计划与 AI 行李推荐（已实现）
 
 - 「旅游计划」Tab 分两区：上方「✨ 发现目的地」按出发城市、交通方式（高铁/自驾/飞机/不限）、天数、主策略（度假优先/性价比优先/不网红优先/综合）、标签与预算，让 AI 推荐小众、避开网红的真实目的地；下方「我的行程」管理多段行程
 - `POST /api/travel/suggest`（无状态）生成候选目的地，每个含「为什么不网红」理由、非网红亮点、人均预算与交通时长；选定后可一键加入行程
+- `POST /api/travel/suggest/stream`（SSE）分阶段推送「联网搜索 → AI 生成 → 计算交通时长」进度，缓解长时间空白；流式不可用时前端自动回退到 `POST /api/travel/suggest`
 - `POST /api/travel/plans/{id}/spots` 为选定目的地生成非网红具体玩法清单（可逐项勾选已安排）
 - 交通时长：配置高德 Key 后**自驾用驾车路径规划（精确）**，高铁/飞机按直线距离估算（高德无跨城铁路/航司时刻）；未配置则整体降级为 LLM 估算，旅游功能仍可用
 - `POST /api/travel/plans/{id}/recommend` 复用系统 LLM 生成结构化行李清单；配置 Brave Search 时先搜对应地点和日期的天气资料，否则明确标注为 LLM 季节常识估算；清单可逐项勾选、编辑并持久化到 SQLite
@@ -177,7 +179,7 @@ PY
 | 层 | 选型 | 说明 |
 |----|------|------|
 | 语言 / 运行时 | Python 3.12 | 类型写法 `X \| None` |
-| Web | FastAPI + Uvicorn + python-multipart | 异步 API；图片附件表单上传 |
+| Web | FastAPI + Uvicorn + python-multipart | 异步 API；图片附件表单上传；SSE 流式走 Starlette 内置 `StreamingResponse`，**无新依赖** |
 | 数据库 | SQLite + aiosqlite | **无 ORM**，裸 SQL，`CREATE TABLE IF NOT EXISTS` |
 | 配置 | python-dotenv | `.env` |
 | HTTP 客户端 | httpx | LLM、Brave Search 调用 |
@@ -404,9 +406,11 @@ python -m app.modules.setup        # LLM / SMTP / Brave 配置读写与掩码
 | POST | `/api/travel/plans/{id}/recommend` | LLM 生成行李清单（结合 Brave 天气） |
 | POST / PUT | `/api/travel/plans/{id}/spots` | 生成 / 保存非网红玩法清单 |
 | POST | `/api/travel/suggest` | 按交通方式/策略推荐候选目的地（AI 未配置 503） |
+| POST | `/api/travel/suggest/stream` | 同上，SSE 分阶段推送进度（前端在流式不可用时自动回退） |
 | GET / POST | `/api/notify/config`、`/test`、`/weekly` | SMTP 配置状态、试发、周报 |
 | POST | `/api/ai/parse`、`/apply` | AI 解析预览、确认写入 |
 | POST | `/api/ai/chat` | 家庭顾问聊天（可选联网搜索） |
+| POST | `/api/ai/chat/stream` | 同上，SSE 逐 token 流式回复（前端在流式不可用时自动回退） |
 | POST | `/api/ai/item-category` | LLM 预测物品分类 |
 | GET | `/api/ai/audit` | AI 写库审计记录 |
 | GET | `/api/ai/suggested-chips` | 获取建议操作快捷片段 |

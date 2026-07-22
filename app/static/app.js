@@ -32,6 +32,7 @@ const API = {
   aiRevert: '/api/ai/revert',
   aiSuggestedChips: '/api/ai/suggested-chips',
   aiChat: '/api/ai/chat',
+  aiChatStream: '/api/ai/chat/stream',
   aiItemCategory: '/api/ai/item-category',
   setupStatus: '/api/setup/status',
   setupLlmConfig: '/api/setup/llm/config',
@@ -55,6 +56,7 @@ const API = {
   travelRecommend: (id) => `/api/travel/plans/${id}/recommend`,
   travelPacking: (id) => `/api/travel/plans/${id}/packing`,
   travelSuggest: '/api/travel/suggest',
+  travelSuggestStream: '/api/travel/suggest/stream',
   travelSpots: (id) => `/api/travel/plans/${id}/spots`,
 };
 
@@ -82,6 +84,42 @@ async function fetchJSON(url, opts = {}) {
   }
   if (res.status === 401 && !url.startsWith('/api/auth/')) renderAuthForm(false);
   return { ok: res.ok, status: res.status, data };
+}
+
+// SSE 流式消费：POST 发起，逐事件回调。仅依赖浏览器原生 fetch + ReadableStream，无新依赖。
+// 仅当 HTTP 非 2xx 或网络失败时 throw（携带 detail）；业务错误以 'error' 事件回调，不 throw。
+async function streamPostSSE(url, body, { onEvent } = {}) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) {
+    let detail = '请求失败';
+    try { detail = (await res.json()).detail || detail; } catch {}
+    const err = new Error(detail); err.status = res.status; err.detail = detail; throw err;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      let evt = 'message', dataStr = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) evt = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+      }
+      let data = dataStr;
+      if (dataStr) { try { data = JSON.parse(dataStr); } catch {} }
+      if (onEvent) onEvent(evt, data);
+    }
+  }
 }
 
 function toast(msg, type = 'info') {
@@ -551,18 +589,31 @@ function readDiscoverRequest() {
 function renderDiscoverResults(data) {
   const cands = data.candidates || [];
   if (!cands.length) return '<div class="empty">未生成候选，换个条件重试</div>';
+  // 是否任一候选拿到了高德精确/距离估算时长；全否则提示去配置高德 Key
+  const hasAmap = cands.some((c) => {
+    const acc = (c.transport || {}).accuracy;
+    return acc === '高德精确' || acc === '距离估算';
+  });
+  const amapHint = hasAmap ? '' : '<div class="discover-note muted">💡 交通时长为 AI 定性估算。前往「设置 → 高德地图」配置 Web 服务 Key 后，可显示出发地到目的地的精确时长与里程。</div>';
   const note = data.strategy_note ? `<div class="discover-note muted">🎯 ${esc(data.strategy_note)} <span class="badge badge-outline">${esc(data.source || '')}</span></div>` : '';
-  return `${note}<div class="discover-candidates">${cands.map(renderDiscoverCandidate).join('')}</div>`;
+  return `${amapHint}${note}<div class="discover-candidates">${cands.map(renderDiscoverCandidate).join('')}</div>`;
 }
 
 function renderDiscoverCandidate(c, index) {
   const t = c.transport || {};
-  const accBadge = t.accuracy === '高德精确'
-    ? '<span class="badge badge-ok">高德精确</span>'
-    : (t.accuracy ? `<span class="badge badge-outline">${esc(t.accuracy)}</span>` : '');
-  const dur = t.duration_hours != null ? `${t.duration_hours}h` : '时长未知';
-  const dist = t.distance_km != null ? ` · ${t.distance_km}km` : '';
-  const transportLine = t.mode ? `<div class="candidate-transport">🚗 ${esc(t.mode)} · ${dur}${dist} ${accBadge}${t.note ? ` <small class="muted">${esc(t.note)}</small>` : ''}</div>` : '';
+  let transportLine;
+  if (t.duration_hours != null) {
+    // 已计算（高德精确 / 距离估算）：展示 交通方式 + 时长 + 里程
+    const accBadge = t.accuracy === '高德精确'
+      ? '<span class="badge badge-ok">高德精确</span>'
+      : (t.accuracy ? `<span class="badge badge-outline">${esc(t.accuracy)}</span>` : '');
+    const dist = t.distance_km != null ? ` · ${t.distance_km}km` : '';
+    transportLine = `<div class="candidate-transport">🚗 ${esc(t.mode || '不限')} · ${t.duration_hours}h${dist} ${accBadge}${t.note ? ` <small class="muted">${esc(t.note)}</small>` : ''}</div>`;
+  } else {
+    // 未配置高德 / 地理编码失败：降级展示 LLM 定性描述，不再显示刺眼的「时长未知」
+    const main = t.note ? esc(t.note) : `${esc(t.mode || '不限')}，精确时长待配置`;
+    transportLine = `<div class="candidate-transport">🚗 ${main} <span class="badge badge-outline" title="在「设置」页配置高德 Web 服务 Key 后，可显示精确交通时长与里程">AI 定性估算</span></div>`;
+  }
   const highlights = (c.highlights || []).length ? `<div class="candidate-highlights"><b>亮点：</b>${c.highlights.map((h) => `<span class="chip-mini">${esc(h)}</span>`).join('')}</div>` : '';
   const tags = (c.tags || []).length ? `<div class="candidate-tags">${c.tags.map((tg) => `<span class="badge badge-outline">${esc(tg)}</span>`).join('')}</div>` : '';
   const metaBits = [c.est_budget_per_person, c.best_days, c.season].filter(Boolean).map((x) => esc(x));
@@ -605,20 +656,37 @@ async function discoverDestinations() {
     tick();
     ticker = setInterval(tick, 1000);
   }
-  document.getElementById('discover-results').innerHTML = '<div class="muted">正在结合 LLM 与高德交通时长生成候选，约需 1 分钟…</div>';
-  toast('正在推荐目的地，约需 1 分钟…');
-  try {
-    const { ok, data } = await fetchJSON(API.travelSuggest, { method: 'POST', body: JSON.stringify(req) });
-    if (!ok) {
-      document.getElementById('discover-results').innerHTML = `<div class="empty">${esc(detailMsg(data, '推荐失败'))}</div>`;
-      return toast(detailMsg(data, '推荐失败'), 'error');
-    }
+  const resultsEl = document.getElementById('discover-results');
+  const setStage = (text) => {
+    const secs = Math.floor((Date.now() - startedAt) / 1000);
+    resultsEl.innerHTML = `<div class="muted discover-stage">⏳ ${esc(text)} <span class="discover-elapsed">${secs}s</span></div>`;
+  };
+  const renderResult = (data) => {
     discoverCache = { request: req, response: data };
-    document.getElementById('discover-results').innerHTML = renderDiscoverResults(data);
+    resultsEl.innerHTML = renderDiscoverResults(data);
     bindDiscoverResultEvents();
     toast(`已推荐 ${(data.candidates || []).length} 个目的地`, 'success');
-  } catch {
-    toast('推荐失败，请检查网络后重试', 'error');
+  };
+  const renderError = (msg) => { resultsEl.innerHTML = `<div class="empty">${esc(msg)}</div>`; };
+  setStage('正在生成候选，约需 1 分钟…');
+  try {
+    await streamPostSSE(API.travelSuggestStream, req, {
+      onEvent: (evt, data) => {
+        if (evt === 'stage' && data?.text) setStage(data.text);
+        else if (evt === 'done') renderResult(data);
+        else if (evt === 'error') { renderError(data?.detail || '推荐失败'); toast(data?.detail || '推荐失败', 'error'); }
+      },
+    });
+  } catch (e) {
+    // 流式端点不可用时回退非流式 /travel/suggest
+    try {
+      const { ok, data } = await fetchJSON(API.travelSuggest, { method: 'POST', body: JSON.stringify(req) });
+      if (ok) renderResult(data);
+      else { const msg = detailMsg(data, '推荐失败'); renderError(msg); toast(msg, 'error'); }
+    } catch {
+      renderError('推荐失败，请检查网络后重试');
+      toast('推荐失败，请检查网络后重试', 'error');
+    }
   } finally {
     if (ticker) clearInterval(ticker);
     if (btn) { btn.disabled = false; btn.textContent = originalText; }
@@ -1987,31 +2055,76 @@ async function sendAiMessage() {
   input.value = '';
   input.style.height = 'auto';
   chatMessages.push({ role: 'user', content: text });
+  // 预先插入一条空 assistant 消息，流式期间原地更新它的气泡（不全量重渲染，避免闪烁/丢焦）
+  const assistant = { role: 'assistant', content: '', streaming: true };
+  chatMessages.push(assistant);
   renderAiWorkbench();
 
   const loading = document.getElementById('ai-loading');
   const sendBtn = document.getElementById('ai-send-btn');
-  if (loading) loading.style.display = 'flex';
+  if (loading) loading.style.display = 'none'; // 流式期间由气泡内的「思考中…」/光标反馈，不再显示底部 spinner
   if (sendBtn) sendBtn.disabled = true;
 
+  // 流式状态：可见回复 acc / 推理过程 reasoning / 阶段提示 stageText
+  let acc = '', reasoning = '', stageText = '', finished = false, gotContent = false, streamError = null;
+  const patch = () => {
+    const msgs = document.getElementById('ai-messages');
+    const bubbles = msgs ? msgs.querySelectorAll('.chat-message.assistant .chat-bubble') : [];
+    const bubble = bubbles[bubbles.length - 1];
+    if (!bubble) return;
+    let html = '';
+    if (reasoning) {
+      html += `<div class="chat-reasoning">${esc(reasoning)}${finished ? '' : '<span class="stream-cursor">▍</span>'}</div>`;
+    }
+    if (stageText) html += `<div class="chat-stage muted">⚙ ${esc(stageText)}</div>`;
+    if (acc) html += renderMarkdown(acc);
+    else if (!reasoning && !stageText) html = '<span class="muted">思考中…</span>';
+    if (!finished && acc && !reasoning) html += '<span class="stream-cursor">▍</span>';
+    bubble.innerHTML = html;
+    if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  };
+  patch();
+
+  const history = chatMessages.slice(-21, -2).map((msg) => ({ role: msg.role, content: msg.content }));
+  // 非流式回退：流式端点连接失败、或上游模型不支持 stream（error 且未产出任何内容）时调用
+  const fallbackNonStream = async () => {
+    chatMessages.pop();
+    renderAiWorkbench();
+    try {
+      const { ok, data } = await fetchJSON(API.aiChat, {
+        method: 'POST', body: JSON.stringify({ text, session_id: null, history }),
+      });
+      chatMessages.push({ role: 'assistant', content: (ok && data?.reply) ? data.reply : (data?.detail || '抱歉，请求失败，请稍后重试。') });
+    } catch {
+      chatMessages.push({ role: 'assistant', content: '网络请求失败，请检查连接后重试。' });
+    }
+  };
   try {
-    const history = chatMessages.slice(-21, -1).map((msg) => ({ role: msg.role, content: msg.content }));
-    const { ok, data } = await fetchJSON(API.aiChat, {
-      method: 'POST',
-      body: JSON.stringify({ text, session_id: null, history }),
+    await streamPostSSE(API.aiChatStream, { text, session_id: null, history }, {
+      onEvent: (evt, data) => {
+        if (evt === 'token' && data?.text != null) { acc += data.text; gotContent = true; patch(); }
+        else if (evt === 'reasoning' && data?.text != null) { reasoning += data.text; gotContent = true; patch(); }
+        else if (evt === 'stage' && data?.text) { stageText = data.text; patch(); }
+        else if (evt === 'done') { acc = data?.reply || acc; stageText = ''; finished = true; patch(); }
+        else if (evt === 'error') { streamError = data?.detail || '抱歉，请求失败，请稍后重试。'; }
+      },
     });
-    if (ok && data?.reply) {
-      chatMessages.push({ role: 'assistant', content: data.reply });
+    if (finished) {
+      assistant.content = acc || '（空回复）';
+    } else if (streamError && !gotContent) {
+      // 上游不可用（如模型不支持 stream）且未产出任何内容 → 回退非流式，体验不中断
+      await fallbackNonStream();
     } else {
-      chatMessages.push({ role: 'assistant', content: data?.detail || '抱歉，请求失败，请稍后重试。' });
+      // 流中断但已有部分内容：保留已收到的部分回复
+      assistant.content = acc || streamError || '（连接中断）';
     }
   } catch (e) {
-    chatMessages.push({ role: 'assistant', content: '网络请求失败，请检查连接后重试。' });
+    await fallbackNonStream();
+  } finally {
+    assistant.streaming = false;
+    if (sendBtn) sendBtn.disabled = false;
+    renderAiWorkbench();
   }
-
-  if (loading) loading.style.display = 'none';
-  if (sendBtn) sendBtn.disabled = false;
-  renderAiWorkbench();
 }
 
 // ============ 全局刷新 ============

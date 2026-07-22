@@ -157,7 +157,7 @@ python -m app.modules.setup
 | `app/modules/ai_workbench.py` | ✅ | LLM parse、校验、字段归一、全流程审计；家庭顾问聊天可选 Brave Search；query.placements + placements 快照；操作撤回、分类预测、建议片段 |
 | `app/modules/ai_executor.py` | ✅ | 白名单写库；`_item_name` 归一 name/item_name；记录前后快照 |
 | `app/modules/setup.py` | ✅ | 配置状态、LLM / SMTP / Brave / Agent Token 配置读写与测试；支持热加载 |
-| `app/modules/travel.py` | ✅ | 旅游计划 CRUD；目的地推荐引擎（交通方式/不网红/度假·性价比）+ 非网红玩法 + 天气行李清单；高德交通时长（可选，REST + 配置 Key） |
+| `app/modules/travel.py` | ✅ | 旅游计划 CRUD；目的地推荐引擎（交通方式/不网红/度假·性价比）+ 非网红玩法 + 天气行李清单；高德交通时长（可选，REST + 配置 Key）；推荐进度流式 SSE（`/travel/suggest/stream`，分阶段推送） |
 | `app/modules/auth.py` | ✅ | 首个管理员、scrypt 密码、180 天长期会话、面板 API 鉴权依赖 |
 | `app/modules/users.py` | ✅ | 管理员用户 CRUD、角色边界、重置密码与会话废止 |
 | `app/database.py` | ✅ | 单例 DB；业务表（含 `items.images` / `placements`）+ `users` / `auth_sessions`；`_ensure_columns` 给旧库补列 |
@@ -191,7 +191,7 @@ python -m app.modules.setup
 
 ## 当前阶段
 
-- ✅ 后端 + 前端四 Tab（AI 工作台 / 日用品 / 重点待办 / 旅游计划）+ EWMA 预测 + SMTP 周报 + AI 工作台 + 旅游重设计（目的地推荐/非网红玩法/高德交通时长）+ 家庭顾问聊天（可选 Brave Search）+ 登录/用户权限 + Docker
+- ✅ 后端 + 前端四 Tab（AI 工作台 / 日用品 / 重点待办 / 旅游计划）+ EWMA 预测 + SMTP 周报 + AI 工作台 + 旅游重设计（目的地推荐/非网红玩法/高德交通时长）+ 家庭顾问聊天（可选 Brave Search）+ 登录/用户权限 + Docker + AI 响应流式输出（SSE：聊天逐 token / 旅游分阶段进度，无新依赖）
 - ⬜ DEVPLAN：待办 18/19（旅游行程规划 + LLM 体验与 UI 打磨）规划中
 - 以**代码**与 **README 状态表**为准；DESIGN 仅作设计背景  
 

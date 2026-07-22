@@ -1173,9 +1173,38 @@ DELETE /api/admin/users/{id}          # 管理员：删除用户并废止会话
 - 行程卡片折叠/展开状态刷新后保持。
 - 行李清单详情页按钮不再拥挤。
 
-**明确不做：** 不引入 SSE/WebSocket 重型框架（用最小分步/流式实现，遵循无重依赖原则）；不改 LLM 供应商 SDK；不新增前端打包器。
+**明确不做：** 不引入需要额外依赖的 SSE/WebSocket 框架；不改 LLM 供应商 SDK；不新增前端打包器。
+
+> 说明（2026-07-22）：子项 2「推荐目的地显示推理过程」已与 AI 工作台聊天的流式输出一并由 **待办 20** 以 Starlette 内置 `StreamingResponse` + 浏览器原生 `fetch` ReadableStream 的轻量 SSE 实现（零新依赖）；本待办其余子项（超时统一、行程卡片折叠、行李清单 UI 美化、基于 `travel_plan_spots` 细化）仍为待办。
 
 **依赖：** 子项 3「基于行程规划细化」依赖待办 18 的 `travel_plan_spots`；其余子项可独立先行。
+
+---
+
+## 待办 20：AI 响应流式输出（SSE）— ✅ 已完成（2026-07-22）
+
+**目标：** 把 AI 工作台聊天与旅游目的地推荐从「干等几十秒」改为「过程可见」——聊天回复与思考过程逐字流出，旅游推荐分阶段显示进度。对应并落地待办 19 子项 2。
+
+**实现：**
+
+1. **AI 工作台聊天流式 `/api/ai/chat/stream`（SSE）**
+   - 新增 `_stream_chat_turn`：流式调用 OpenAI-compatible `/chat/completions`（`stream:true`），解析 `delta.content`（可见回复）与 `delta.reasoning_content`（DeepSeek 等模型的推理过程，可选），累积 `tool_calls` 增量。
+   - 多轮 tool-calling 与 `/api/ai/chat` 一致：工具决策轮推送 `stage`（「正在执行操作…」）后静默执行；最终回复轮逐 token 推送 `token` / `reasoning`；结束推 `done`，失败推 `error`；汇总审计（before/after 快照）与撤回能力不变。
+   - 提取 `_chat_system_prompt` / `_chat_tools` 供流式与非流式端点共用，避免漂移。
+2. **旅游推荐进度流式 `/api/travel/suggest/stream`（SSE）**
+   - 复用 `_suggest_destinations`（LLM 仍非流式，因输出 JSON 逐字显示无意义），在 Brave 搜索 / LLM 生成 / 高德交通时长三个边界推送 `stage` 进度，最后推 `done(候选)`；高德 enrichment 与 `/api/travel/suggest` 同构。
+3. **前端 `streamPostSSE`**：浏览器原生 `fetch` + `ReadableStream` 解析 SSE，无 EventSource / 无新依赖。聊天气泡原地 patch（不全量重渲染）+ 流式光标；旅游进度区按阶段更新并显示已用秒数。
+4. **自动回退**：流式端点不可用（HTTP 非 2xx 或上游不支持 stream）时，前端自动回退到非流式 `/api/ai/chat`、`/api/travel/suggest`，体验不中断。原非流式端点保留不动。
+
+**验收：**
+- 聊天回复逐字出现，工具调用阶段显示「正在执行操作…」；DeepSeek 类模型额外显示推理过程块。
+- 旅游推荐依次显示「联网搜索 / AI 生成 / 计算交通时长」进度与已用秒数，不再长时间空白。
+- 流式端点连接失败时自动回退非流式，功能不中断；两个新端点经面板 session 鉴权（未登录 401）。
+- `python -m app.modules.ai_workbench`、`python -m app.modules.travel` 自检通过；无新依赖（复用 httpx / Starlette 内置）。
+
+**明确不做：** 不引入 WebSocket；不新增 SSE 第三方库；不为流式引入前端打包器；不改非流式端点行为（仅前端优先调流式）。
+
+**依赖：** 无；复用现有 LLM / Brave / 高德配置，无新环境变量。
 
 ---
 

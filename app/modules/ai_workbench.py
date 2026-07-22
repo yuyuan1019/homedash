@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.database import get_db
@@ -430,6 +431,98 @@ def _llm_config() -> tuple[str, str, str, float]:
     return base_url, api_key, model, timeout_sec
 
 
+def _sse(event: str, data: dict) -> str:
+    """格式化一条 SSE 事件（event + data JSON）。chat / travel 流式端点共用。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _chat_system_prompt(brave_available: bool, snapshot_json: str) -> str:
+    """聊天 system prompt。chat / chat_stream 共用，避免两处漂移。"""
+    return (
+        "你是 HomeDash 家庭管理助手，一个友好、简洁的中文助手。你可以：\n"
+        "- 操作库存：购买入库、消耗使用、盘点、新建/修改物品（用 manage_item 工具）\n"
+        "- 管理待办：新建、完成、重开、修改、删除待办（用 manage_todo 工具）\n"
+        "- 查询数据：查看需购清单、搜索物品、查看待办、搜收纳记录回答「X 放哪了」（用 query_home 工具）\n"
+        "- 解答家庭物品管理、库存预测、家务收纳等问题\n"
+        + ("- 搜索网络获取实时信息：天气、新闻、百科等（用 brave_web_search 工具）\n" if brave_available else "")
+        + "用户说加/买/入库/用了/消耗/盘点/新建物品/新建待办/完成待办等指令时，请调用对应工具执行。"
+        "纯聊天问题时直接回复，不要调用工具。回复用中文，简洁清晰，不要 Markdown 格式。如果不知道答案，诚实说明。\n"
+        "上下文：" + snapshot_json
+    )
+
+
+def _chat_tools(brave_available: bool) -> list:
+    tools = [MANAGE_ITEM_TOOL, MANAGE_TODO_TOOL, QUERY_HOME_TOOL]
+    if brave_available:
+        tools.append(BRAVE_SEARCH_TOOL)
+    return tools
+
+
+async def _stream_chat_turn(client: httpx.AsyncClient, base_url: str, api_key: str, body: dict):
+    """流式调用一次 LLM chat completion（OpenAI-compatible SSE）。
+
+    逐块 yield 事件元组：
+    - ("token", piece)：可见回复文本增量
+    - ("reasoning", piece)：推理过程增量（DeepSeek 等模型的 reasoning_content，无则不发）
+    - ("done", {"content": str, "tool_calls": list|None})：本轮结束，给出累积完整内容与工具调用
+    - ("error", (status, text))：上游返回错误状态码
+    """
+    headers = {"Authorization": f"Bearer {api_key}"}
+    content_acc = ""
+    reasoning_acc = ""
+    tool_acc: dict[int, dict] = {}
+    err = None
+    async with client.stream("POST", f"{base_url}/chat/completions",
+                             headers=headers, json={**body, "stream": True}) as resp:
+        if resp.status_code >= 400:
+            await resp.aread()
+            err = (resp.status_code, resp.text)
+        else:
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    content_acc += piece
+                    yield ("token", piece)
+                rpiece = delta.get("reasoning_content")
+                if rpiece:
+                    reasoning_acc += rpiece
+                    yield ("reasoning", rpiece)
+                for tc in (delta.get("tool_calls") or []):
+                    idx = tc.get("index", 0)
+                    slot = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["arguments"] += fn["arguments"]
+    if err:
+        yield ("error", err)
+        return
+    tool_calls = None
+    if tool_acc:
+        tool_calls = [
+            {"id": v["id"], "type": "function",
+             "function": {"name": v["name"], "arguments": v["arguments"]}}
+            for _, v in sorted(tool_acc.items())
+        ]
+    yield ("done", {"content": content_acc, "tool_calls": tool_calls})
+
+
 async def _snapshot(db) -> dict:
     cur = await db.execute("SELECT id,name,unit,current_stock,category,location,expires_at FROM items ORDER BY id LIMIT 80")
     item_rows = [dict(row) for row in await cur.fetchall()]
@@ -605,18 +698,7 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
     base_url, api_key, model, timeout_sec = _llm_config()
     brave_available = _brave_api_key() is not None
     snapshot_json = json.dumps(await _snapshot(db), ensure_ascii=False)
-    chat_prompt = (
-        "你是 HomeDash 家庭管理助手，一个友好、简洁的中文助手。你可以：\n"
-        "- 操作库存：购买入库、消耗使用、盘点、新建/修改物品（用 manage_item 工具）\n"
-        "- 管理待办：新建、完成、重开、修改、删除待办（用 manage_todo 工具）\n"
-        "- 查询数据：查看需购清单、搜索物品、查看待办、搜收纳记录回答「X 放哪了」（用 query_home 工具）\n"
-        "- 解答家庭物品管理、库存预测、家务收纳等问题\n"
-        + ("- 搜索网络获取实时信息：天气、新闻、百科等（用 brave_web_search 工具）\n" if brave_available else "")
-        + "用户说加/买/入库/用了/消耗/盘点/新建物品/新建待办/完成待办等指令时，请调用对应工具执行。"
-        "纯聊天问题时直接回复，不要调用工具。回复用中文，简洁清晰，不要 Markdown 格式。如果不知道答案，诚实说明。\n"
-        "上下文：" + snapshot_json
-    )
-    messages = [{"role": "system", "content": chat_prompt}]
+    messages = [{"role": "system", "content": _chat_system_prompt(brave_available, snapshot_json)}]
     if payload.history and isinstance(payload.history, list):
         for msg in payload.history[-20:]:
             role = msg.get("role", "")
@@ -625,9 +707,7 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
                 messages.append({"role": role, "content": str(content)})
     messages.append({"role": "user", "content": payload.text})
 
-    tools = [MANAGE_ITEM_TOOL, MANAGE_TODO_TOOL, QUERY_HOME_TOOL]
-    if brave_available:
-        tools.append(BRAVE_SEARCH_TOOL)
+    tools = _chat_tools(brave_available)
 
     started = time.perf_counter()
     final_reply = ""
@@ -754,6 +834,132 @@ async def chat(payload: ChatIn, db=Depends(get_db)):
                       before_json=_dumps(chat_before) if chat_before else None,
                       after_json=_dumps(chat_after) if chat_after else None)
     return {"ok": True, "reply": final_reply, "session_id": payload.session_id}
+
+
+@router.post("/ai/chat/stream")
+async def chat_stream(payload: ChatIn, db=Depends(get_db)):
+    """流式聊天：LLM 可见回复与推理过程逐 token 经 SSE 推送；工具调用阶段推送 stage 提示。
+    多轮 tool-calling、汇总审计与 /ai/chat 一致。上游若不支持 stream，前端会回退到 /ai/chat。
+    # ponytail: 工具执行/审计结构与 chat() 相同，刻意保留两份以避免改动已上线端点。
+    """
+    if not _enabled():
+        raise HTTPException(503, "AI 工作台未开启")
+    if not payload.text.strip():
+        raise HTTPException(400, "请输入内容")
+    base_url, api_key, model, timeout_sec = _llm_config()
+    brave_available = _brave_api_key() is not None
+    snapshot_json = json.dumps(await _snapshot(db), ensure_ascii=False)
+    messages = [{"role": "system", "content": _chat_system_prompt(brave_available, snapshot_json)}]
+    if payload.history and isinstance(payload.history, list):
+        for msg in payload.history[-20:]:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": str(content)})
+    messages.append({"role": "user", "content": payload.text})
+    tools = _chat_tools(brave_available)
+
+    async def event_gen():
+        started = time.perf_counter()
+        max_turns = 5
+        max_actions = _max_actions()
+        action_count = 0
+        chat_actions: list[dict] = []
+        chat_results: list[dict | None] = []
+        chat_before: list[dict] = []
+        chat_after: list[dict] = []
+        try:
+            async with httpx.AsyncClient(timeout=timeout_sec) as client:
+                final_reply = ""
+                for _ in range(max_turns):
+                    body = {"model": model, "messages": messages, "tools": tools}
+                    turn_done = None
+                    turn_err = None
+                    async for kind, val in _stream_chat_turn(client, base_url, api_key, body):
+                        if kind == "token":
+                            yield _sse("token", {"text": val})
+                        elif kind == "reasoning":
+                            yield _sse("reasoning", {"text": val})
+                        elif kind == "done":
+                            turn_done = val
+                        elif kind == "error":
+                            turn_err = val
+                    if turn_err:
+                        status, _text = turn_err
+                        await _safe_audit(db, raw_text=payload.text, ok=False, stage="chat",
+                                          session_id=payload.session_id, llm_model=model,
+                                          duration_ms=int((time.perf_counter() - started) * 1000),
+                                          error=f"stream {status}")
+                        yield _sse("error", {"detail": _llm_error_message(status)})
+                        return
+                    if turn_done is None:
+                        yield _sse("error", {"detail": "模型连接中断，请稍后重试"})
+                        return
+                    tool_calls = turn_done.get("tool_calls")
+                    assistant_content = turn_done.get("content") or ""
+                    if tool_calls:
+                        if action_count + len(tool_calls) > max_actions:
+                            yield _sse("error", {"detail": f"单次对话最多执行 {max_actions} 个操作"})
+                            return
+                        messages.append({"role": "assistant", "content": assistant_content or None,
+                                         "tool_calls": tool_calls})
+                        yield _sse("stage", {"text": "正在执行操作…"})
+                        for tc in tool_calls:
+                            func = tc.get("function", {})
+                            func_name = func.get("name", "")
+                            args_str = func.get("arguments", "{}")
+                            try:
+                                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                            except json.JSONDecodeError:
+                                args = {}
+                            is_write = func_name in ("manage_item", "manage_todo")
+                            snap_action = ({**args, "op": "item." if func_name == "manage_item" else "todo."}
+                                           if is_write else None)
+                            before = await _snapshot_target(db, snap_action) if is_write else None
+                            result_text = await _execute_tool(db, func_name, args)
+                            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
+                            if is_write:
+                                action_count += 1
+                                tool_ops = TOOL_ITEM_OPS if func_name == "manage_item" else TOOL_TODO_OPS
+                                op = tool_ops.get(args.get("action", ""))
+                                try:
+                                    result_obj = json.loads(result_text) if result_text.startswith("{") else None
+                                except json.JSONDecodeError:
+                                    result_obj = None
+                                chat_actions.append({**args, "op": op, "tool": func_name})
+                                chat_results.append(result_obj)
+                                chat_before.append(before)
+                                chat_after.append(await _snapshot_target(db, snap_action, result_obj))
+                        continue
+                    # 无 tool_calls：本轮 token 已流式推送，此即最终回复
+                    final_reply = assistant_content.strip()
+                    break
+            if not final_reply:
+                yield _sse("error", {"detail": "模型未返回有效回复"})
+                return
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            await _safe_audit(db, raw_text=payload.text, ok=True, stage="chat",
+                              session_id=payload.session_id, llm_model=model,
+                              llm_reply=final_reply, duration_ms=duration_ms,
+                              actions=chat_actions or None, results=chat_results or None,
+                              before_json=_dumps(chat_before) if chat_before else None,
+                              after_json=_dumps(chat_after) if chat_after else None)
+            yield _sse("done", {"reply": final_reply, "session_id": payload.session_id})
+        except HTTPException as exc:
+            yield _sse("error", {"detail": str(exc.detail) if exc.detail else "模型调用失败"})
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            err = str(exc) or exc.__class__.__name__
+            await _safe_audit(db, raw_text=payload.text, ok=False, stage="chat",
+                              session_id=payload.session_id, llm_model=model,
+                              duration_ms=duration_ms, error=err,
+                              actions=chat_actions or None, results=chat_results or None,
+                              before_json=_dumps(chat_before) if chat_before else None,
+                              after_json=_dumps(chat_after) if chat_after else None)
+            yield _sse("error", {"detail": "模型调用失败，请检查 LLM 配置或稍后重试"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.post("/ai/item-category")
